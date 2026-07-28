@@ -62,7 +62,7 @@ error_count = 0
 total_bytes_transferred = 0
 
 # 各通道最新數據紀錄
-latest_ai_data = {ch: {"raw_be": 0, "raw_le": 0, "payload": []} for ch in range(NUM_CHANNELS)}
+latest_ai_data = {ch: {"val": 0.0, "payload": []} for ch in range(NUM_CHANNELS)}
 
 print(f"\n[🚀 AI (Analog Input) 8 通道讀取測試] 準備執行 {ITERATIONS} 次全通道循環...")
 print("測試進行中，請稍候...\n")
@@ -81,18 +81,17 @@ for i in range(ITERATIONS):
             
             response = ep_in.read(64, timeout=100)
             
-            if len(response) >= 4 and response[0] == 0xAA and response[1] == 0x03:
+            if len(response) >= 11 and response[0] == 0xAA and response[1] == 0x03:
                 success_count += 1
                 total_bytes_transferred += (len(packet_ai_read) + len(response))
                 
-                # 解析數值 (第 3-4 Byte 為 16-bit ADC 數值)
-                raw_be = (response[3] << 8) | response[4] if len(response) >= 5 else 0
-                raw_le = response[3] | (response[4] << 8) if len(response) >= 5 else 0
+                # 解碼 8 Byte 雙精度浮點數 (<d: Little-Endian float64)
+                ai_bytes = bytearray(response[3:11])
+                ai_value = struct.unpack('<d', ai_bytes)[0]
                 
                 latest_ai_data[ch] = {
-                    "raw_be": raw_be,
-                    "raw_le": raw_le,
-                    "payload": list(response[3:])
+                    "val": ai_value,
+                    "payload": list(response[3:11])
                 }
             else:
                 error_count += 1
@@ -122,11 +121,11 @@ print(f"成功次數        : {success_count} 次")
 print(f"失敗/超時 (USB) : {error_count} 次")
 print(f"總傳輸資料量    : {total_bytes_transferred} Bytes")
 print("-" * 55)
-print("📈 最新各 AI 通道採樣狀態:")
+print("📈 最新各 AI 通道採樣電壓/電流值:")
 for ch in range(NUM_CHANNELS):
     data = latest_ai_data[ch]
     payload_str = " ".join([f"{b:02X}" for b in data["payload"]])
-    print(f"  AI{ch} 通道 -> Raw (BE): {data['raw_be']:5d} | Raw (LE): {data['raw_le']:5d} | 封包: [{payload_str}]")
+    print(f"  AI{ch} 通道 -> 數值: {data['val']:10.4f} | 封包[3:11]: [{payload_str}]")
 print("-" * 55)
 print(f"⏱️ 單通道採樣延遲            : {avg_latency_ms:.4f} 毫秒/通道")
 print(f"🚀 每秒實際 I/O 吞吐量 (TPS) : {tps:.2f} 次/秒")
