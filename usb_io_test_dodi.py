@@ -34,16 +34,23 @@ intf = usb.util.find_descriptor(
 if intf is None:
     raise ValueError("找不到自訂的 I/O Interface。")
 
-# 跨平台判斷：在 Linux 下精準解除這一個特定介面的核心佔用
+# =========================================================
+# 🌟 修改這裡：將跨平台判斷改為精準鎖定 'linux'
+# 因為 macOS ('darwin') 不支援也不需要呼叫 detach_kernel_driver
+# =========================================================
 import sys
-if sys.platform != 'win32':
-    if dev.is_kernel_driver_active(intf.bInterfaceNumber):
-        try:
+if sys.platform == 'linux':
+    try:
+        if dev.is_kernel_driver_active(intf.bInterfaceNumber):
             dev.detach_kernel_driver(intf.bInterfaceNumber)
             print(f"已解除 Linux 預設驅動對介面 {intf.bInterfaceNumber} 的佔用")
-        except usb.core.USBError as e:
-            print(f"解除核心驅動失敗: {e}")
-
+    except NotImplementedError:
+        pass # 防呆：如果某些閹割版 Linux 沒實作，直接忽略
+    except usb.core.USBError as e:
+        print(f"解除核心驅動失敗: {e}")
+elif sys.platform == 'darwin':
+    print("偵測到 macOS 系統，自動跳過驅動解除步驟。")
+    
 ep_out = usb.util.find_descriptor(
     intf, custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT)
 ep_in = usb.util.find_descriptor(
