@@ -2,6 +2,7 @@ import usb.core
 import usb.util
 import time
 import libusb_package
+import threading
 
 # RK3506 預設的 VID 與 PID
 VID = 0x2207
@@ -55,6 +56,17 @@ ep_out = usb.util.find_descriptor(
     intf, custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT)
 ep_in = usb.util.find_descriptor(
     intf, custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_IN)
+
+# 🌟 自動尋找 Interrupt IN 端點 (bmAttributes == 3)
+ep_intr = usb.util.find_descriptor(
+    intf,
+    custom_match=lambda e: \
+        usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_IN and \
+        usb.util.endpoint_type(e.bmAttributes) == usb.util.ENDPOINT_TYPE_INTR
+)
+
+if ep_intr is None:
+    raise ValueError("找不到 Interrupt 端點！請確認 C 描述符是否有更新。")
 
 # =========================================================
 # 壓力測試參數設定
@@ -149,3 +161,37 @@ print("-" * 55)
 print(f"⏱️ 單通道驗證延遲 (寫+讀)    : {avg_loop_latency_ms:.4f} 毫秒/通道")
 print(f"🚀 每秒實際 I/O 吞吐量 (TPS) : {tps:.2f} 次傳輸/秒")
 print("-" * 55)
+
+time.sleep(1)
+
+# 建立一個背景監聽函數
+def listen_for_interrupts():
+    print("[監聽者] DI 狀態中斷監聽執行緒已啟動...")
+    while True:
+        try:
+            # timeout=0 代表永遠等待 (Blocking)，直到有資料推播進來
+            # 這樣「完全不吃 CPU」，是最高效的做法！
+            data = ep_intr.read(64, timeout=0) 
+            
+            # 解析我們自訂的 0xBB 通知封包
+            if len(data) >= 3 and data[0] == 0xBB:
+                channel = data[1]
+                state = data[2]
+                print(f"\n⚡ [硬體觸發] DI 通道 {channel} 狀態改變為: {state}！")
+                
+        except usb.core.USBError as e:
+            # 處理斷線或程式結束
+            print(f"中斷監聽停止: {e}")
+            break
+
+# 將監聽器放進背景 Thread 執行
+listener_thread = threading.Thread(target=listen_for_interrupts, daemon=True)
+listener_thread.start()
+
+# ==================================
+# 下面您可以繼續寫您的主程式 (GUI 或其他控制迴圈)
+# 主程式可以繼續用 ep_out 和 ep_in 控制 Bulk 傳輸
+# ==================================
+print("主程式繼續執行...")
+while True:
+    time.sleep(1) # 模擬主程式運作
