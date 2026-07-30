@@ -92,6 +92,10 @@ def listen_for_interrupts():
         except usb.core.USBError as e:
             # 如果是正常的 Timeout，直接忽略並繼續下一次監聽
             if e.errno == 60 or e.errno == 110 or 'timed out' in str(e).lower() or 'timeout' in str(e).lower():
+                
+                # 🌟 終極防護：讓硬體稍微喘息，避免瘋狂輪詢塞爆 DWC2 的 NAK 處理器
+                time.sleep(0.01) 
+                
                 continue
                 
             # 如果是設備拔除等嚴重錯誤，才印出並退出
