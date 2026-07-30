@@ -52,22 +52,61 @@ if sys.platform == 'linux':
 elif sys.platform == 'darwin':
     print("偵測到 macOS 系統，自動跳過驅動解除步驟。")
     
+# =========================================================
+# 🌟 修正 1：嚴格過濾 BULK 端點，避免抓錯
+# =========================================================
 ep_out = usb.util.find_descriptor(
-    intf, custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT)
+    intf, custom_match=lambda e: \
+        usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT and \
+        usb.util.endpoint_type(e.bmAttributes) == usb.util.ENDPOINT_TYPE_BULK)
+
 ep_in = usb.util.find_descriptor(
-    intf, custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_IN)
-
-# 🌟 自動尋找 Interrupt IN 端點 (bmAttributes == 3)
-ep_intr = usb.util.find_descriptor(
-    intf,
-    custom_match=lambda e: \
+    intf, custom_match=lambda e: \
         usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_IN and \
-        usb.util.endpoint_type(e.bmAttributes) == usb.util.ENDPOINT_TYPE_INTR
-)
+        usb.util.endpoint_type(e.bmAttributes) == usb.util.ENDPOINT_TYPE_BULK)
 
-if ep_intr is None:
-    raise ValueError("找不到 Interrupt 端點！請確認 C 描述符是否有更新。")
+ep_intr = usb.util.find_descriptor(
+    intf, custom_match=lambda e: \
+        usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_IN and \
+        usb.util.endpoint_type(e.bmAttributes) == usb.util.ENDPOINT_TYPE_INTR)
 
+if None in (ep_out, ep_in, ep_intr):
+    raise ValueError("找不到正確的端點！")
+
+# 建立一個背景監聽函數
+def listen_for_interrupts():
+    print("[監聽者] DI 狀態中斷監聽執行緒已啟動...")
+    while True:
+        try:
+            # 🌟 關鍵修正：絕對不能用 timeout=0！
+            # 改用 timeout=50，讓 libusb 有機會把底層鎖 (Lock) 讓給主執行緒
+            data = ep_intr.read(64, timeout=50) 
+            
+            # 解析我們自訂的 0xBB 通知封包
+            if len(data) >= 3 and data[0] == 0xBB:
+                channel = data[1]
+                state = data[2]
+                # 為了避免洗頻干擾效能測試，我們可以稍微縮減輸出的視覺佔用
+                print(f"  ⚡ [中斷推播] DI {channel} -> {state}")
+                
+        except usb.core.USBError as e:
+            # 如果是正常的 Timeout，直接忽略並繼續下一次監聽
+            if e.errno == 60 or e.errno == 110 or 'timed out' in str(e).lower() or 'timeout' in str(e).lower():
+                continue
+                
+            # 如果是設備拔除等嚴重錯誤，才印出並退出
+            print(f"中斷監聽停止: {e}")
+            break
+
+# 將監聽器放進背景 Thread 執行
+listener_thread = threading.Thread(target=listen_for_interrupts, daemon=True)
+listener_thread.start()
+time.sleep(0.5) # 給執行緒一點時間啟動
+
+# ==================================
+# 下面您可以繼續寫您的主程式 (GUI 或其他控制迴圈)
+# 主程式可以繼續用 ep_out 和 ep_in 控制 Bulk 傳輸
+# ==================================
 # =========================================================
 # 壓力測試參數設定
 # =========================================================
@@ -162,36 +201,6 @@ print(f"⏱️ 單通道驗證延遲 (寫+讀)    : {avg_loop_latency_ms:.4f} �
 print(f"🚀 每秒實際 I/O 吞吐量 (TPS) : {tps:.2f} 次傳輸/秒")
 print("-" * 55)
 
-time.sleep(1)
-
-# 建立一個背景監聽函數
-def listen_for_interrupts():
-    print("[監聽者] DI 狀態中斷監聽執行緒已啟動...")
-    while True:
-        try:
-            # timeout=0 代表永遠等待 (Blocking)，直到有資料推播進來
-            # 這樣「完全不吃 CPU」，是最高效的做法！
-            data = ep_intr.read(64, timeout=0) 
-            
-            # 解析我們自訂的 0xBB 通知封包
-            if len(data) >= 3 and data[0] == 0xBB:
-                channel = data[1]
-                state = data[2]
-                print(f"\n⚡ [硬體觸發] DI 通道 {channel} 狀態改變為: {state}！")
-                
-        except usb.core.USBError as e:
-            # 處理斷線或程式結束
-            print(f"中斷監聽停止: {e}")
-            break
-
-# 將監聽器放進背景 Thread 執行
-listener_thread = threading.Thread(target=listen_for_interrupts, daemon=True)
-listener_thread.start()
-
-# ==================================
-# 下面您可以繼續寫您的主程式 (GUI 或其他控制迴圈)
-# 主程式可以繼續用 ep_out 和 ep_in 控制 Bulk 傳輸
-# ==================================
 print("主程式繼續執行...")
 while True:
     time.sleep(1) # 模擬主程式運作
