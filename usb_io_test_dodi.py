@@ -89,7 +89,7 @@ def main_daq_loop():
         # =========================================================
         print("🚀 開始執行通訊任務...")
         
-        ITERATIONS = 500   # 執行 500 次「全 8 通道」循環
+        ITERATIONS = 5000   # 執行 500 次「全 8 通道」循環
         NUM_CHANNELS = 8   # 通道數量 (0 ~ 7)
 
         success_count = 0
@@ -103,6 +103,9 @@ def main_daq_loop():
         print("測試進行中，請稍候...\n")
 
         start_time = time.perf_counter()
+
+        # 在進入迴圈前，新增一個連續錯誤計數器
+        consecutive_timeouts = 0
 
         for i in range(ITERATIONS):
             if i > 0 and i % 50 == 0:
@@ -121,7 +124,7 @@ def main_daq_loop():
 
                     # 🌟 關鍵解法：加入 2 毫秒的硬體穩定時間 (Settling Time)
                     # 讓 DO 的電壓有足夠時間爬升，並穿越 DI 的邏輯判斷閾值
-                    time.sleep(0.005) 
+                    time.sleep(0.01) 
 
                     # 2. 讀取 DI 狀態
                     packet_di_read = bytes([0xAA, 0x01, ch, 0x00])
@@ -147,10 +150,22 @@ def main_daq_loop():
                     # 給硬體 1 毫秒的喘息時間
                     time.sleep(0.001)
 
+                    # 如果成功執行到這裡，代表通訊正常，將計數器歸零
+                    consecutive_timeouts = 0
+
                 except usb.core.USBError as e:
                     if e.errno in (60, 110) or 'timed out' in str(e).lower() or 'timeout' in str(e).lower():
                         error_count += 1
                         print(f"[USB 錯誤] 通道 {ch} 傳輸超時: {e}")
+                        
+                        # 🌟 軟體看門狗：累加連續超時次數
+                        consecutive_timeouts += 1
+                        
+                        # 如果連續 8 個通道都無回應，判定 Bulk 通道已死鎖！
+                        if consecutive_timeouts >= 8:
+                            print("\n💥 偵測到 Bulk 通道連續超時失去回應！強制啟動重連機制...")
+                            # 強制拋出異常，打破迴圈，交給外層的 except 與 finally 處理重連
+                            raise usb.core.USBError("軟體層級 Bulk 通道死鎖")
                     else:
                         # 斷線或其他嚴重錯誤，往上拋以觸發重連
                         raise e
