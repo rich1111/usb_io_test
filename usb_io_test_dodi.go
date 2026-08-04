@@ -24,7 +24,7 @@ const (
 )
 
 func main() {
-	fmt.Println("🚀 啟動 Golang USB Host 測試工具 (改造版 gousb)")
+	fmt.Println("🚀 啟動 Golang USB Host 測試工具")
 
 	ctx := gousb.NewContext()
 	defer ctx.Close()
@@ -53,13 +53,14 @@ func runDaqLoop(ctx *gousb.Context) error {
 	defer dev.Close()
 
 	// ==========================================
-	// 🌟 啟動自動釋放驅動！(由於我們改了原始碼，它現在只會釋放 Interface 2)
+	// 🌟 啟動自動釋放驅動！
 	// ==========================================
-	if runtime.GOOS == "linux" {
+	switch runtime.GOOS {
+	case "linux":
 		if err := dev.SetAutoDetach(true); err != nil {
 			log.Printf("⚠️ 警告: 無法設定自動釋放驅動: %v\n", err)
 		}
-	} else if runtime.GOOS == "darwin" {
+	case "darwin":
 		fmt.Println("偵測到 macOS 系統，自動跳過驅動解除步驟。")
 	}
 
