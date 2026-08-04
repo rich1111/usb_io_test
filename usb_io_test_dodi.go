@@ -1,8 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
+	"runtime"
+	"syscall"
 	"time"
 
 	"github.com/google/gousb"
@@ -21,8 +26,11 @@ const (
 func main() {
 	fmt.Println("🚀 啟動 Golang USB Host 測試工具 (改造版 gousb)")
 
+	ctx := gousb.NewContext()
+	defer ctx.Close()
+
 	for {
-		err := runDaqLoop()
+		err := runDaqLoop(ctx)
 		if err != nil {
 			log.Printf("💥 [主程式] 偵測到 USB 斷線或發生錯誤: %v\n", err)
 			log.Println("⏳ 等待 5 秒後啟動自動重連機制...")
@@ -31,9 +39,7 @@ func main() {
 	}
 }
 
-func runDaqLoop() error {
-	ctx := gousb.NewContext()
-	defer ctx.Close()
+func runDaqLoop(ctx *gousb.Context) error {
 
 	fmt.Println("\n🔍 正在尋找 RK3506 Native I/O 模組...")
 	dev, err := ctx.OpenDeviceWithVIDPID(gousb.ID(VID), gousb.ID(PID))
@@ -49,9 +55,16 @@ func runDaqLoop() error {
 	// ==========================================
 	// 🌟 啟動自動釋放驅動！(由於我們改了原始碼，它現在只會釋放 Interface 2)
 	// ==========================================
-	if err := dev.SetAutoDetach(true); err != nil {
-		log.Printf("⚠️ 警告: 無法設定自動釋放驅動: %v\n", err)
+	if runtime.GOOS == "linux" {
+		if err := dev.SetAutoDetach(true); err != nil {
+			log.Printf("⚠️ 警告: 無法設定自動釋放驅動: %v\n", err)
+		}
+	} else if runtime.GOOS == "darwin" {
+		fmt.Println("偵測到 macOS 系統，自動跳過驅動解除步驟。")
 	}
+
+	activeCfg, err := dev.ActiveConfigNum()
+	log.Printf("Current Active Config: %d, err: %v", activeCfg, err)
 
 	cfg, err := dev.Config(1)
 	if err != nil {
@@ -59,17 +72,16 @@ func runDaqLoop() error {
 	}
 	defer cfg.Close()
 
-	// 動態尋找 Vendor Specific 介面 (Class=255)
+	// 動態尋找 Vendor Specific 介面 (Class=255, SubClass=0, Protocol=0)
 	var targetIntfNum = -1
 	for intfNum, intfDesc := range cfg.Desc.Interfaces {
 		for _, alt := range intfDesc.AltSettings {
-			if alt.Class == gousb.ClassVendorSpec {
-				targetIntfNum = intfNum
+			if alt.Class == gousb.ClassVendorSpec && alt.SubClass == 0 && alt.Protocol == 0 {
+				if targetIntfNum == -1 || intfNum < targetIntfNum {
+					targetIntfNum = intfNum
+				}
 				break
 			}
-		}
-		if targetIntfNum != -1 {
-			break
 		}
 	}
 
@@ -89,14 +101,32 @@ func runDaqLoop() error {
 	var epIn, epIntr *gousb.InEndpoint
 
 	for _, epDesc := range intf.Setting.Endpoints {
-		if epDesc.Direction == gousb.EndpointDirectionOut && epDesc.TransferType == gousb.TransferTypeBulk {
+		if epOut == nil && epDesc.Direction == gousb.EndpointDirectionOut && epDesc.TransferType == gousb.TransferTypeBulk {
 			epOut, _ = intf.OutEndpoint(epDesc.Number)
-		} else if epDesc.Direction == gousb.EndpointDirectionIn && epDesc.TransferType == gousb.TransferTypeBulk {
+		} else if epIn == nil && epDesc.Direction == gousb.EndpointDirectionIn && epDesc.TransferType == gousb.TransferTypeBulk {
 			epIn, _ = intf.InEndpoint(epDesc.Number)
-		} else if epDesc.Direction == gousb.EndpointDirectionIn && epDesc.TransferType == gousb.TransferTypeInterrupt {
+		} else if epIntr == nil && epDesc.Direction == gousb.EndpointDirectionIn && epDesc.TransferType == gousb.TransferTypeInterrupt {
 			epIntr, _ = intf.InEndpoint(epDesc.Number)
 		}
 	}
+
+	if epOut == nil || epIn == nil || epIntr == nil {
+		return fmt.Errorf("找不到必要的端點！(epOut, epIn, epIntr)")
+	}
+
+	// ==========================================
+	// 🌟 攔截 Ctrl+C 以確保資源被正確釋放 (避免 macOS 鎖死 USB)
+	// ==========================================
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		fmt.Println("\n🧹 收到中斷訊號，正在歸還 macOS 設備控制權並清理緩衝區...")
+		intf.Close()
+		cfg.Close()
+		dev.Close()
+		os.Exit(0)
+	}()
 
 	// ==========================================
 	// 🌟 背景監聽執行緒 (Interrupt 推播)
@@ -137,27 +167,42 @@ func runDaqLoop() error {
 			targetState := byte((i + ch) % 2)
 
 			cmdDO := []byte{UsbHeaderByte, UsbCmdWriteDO, byte(ch), targetState}
-			if _, err := epOut.Write(cmdDO); err != nil {
+			ctxDO, cancelDO := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			if _, err := epOut.WriteContext(ctxDO, cmdDO); err != nil {
 				errorCount++
 				consecutiveTimeouts++
 				if consecutiveTimeouts >= 8 {
 					close(done)
+					cancelDO()
 					return fmt.Errorf("Bulk 寫入連續失敗")
 				}
+				cancelDO()
 				continue
 			}
+			cancelDO()
+
+			// 🌟 必須讀取 DO 的回應，否則裝置端會因為 buffer 滿而死鎖
+			respDO := make([]byte, 64)
+			ctxDOResp, cancelDOResp := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			epIn.ReadContext(ctxDOResp, respDO)
+			cancelDOResp()
 
 			time.Sleep(10 * time.Millisecond)
 
 			cmdDI := []byte{UsbHeaderByte, UsbCmdReadDI, byte(ch), 0x00}
-			if _, err := epOut.Write(cmdDI); err != nil {
+			ctxDI, cancelDI := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			if _, err := epOut.WriteContext(ctxDI, cmdDI); err != nil {
 				errorCount++
 				consecutiveTimeouts++
+				cancelDI()
 				continue
 			}
+			cancelDI()
 
 			resp := make([]byte, 64)
-			n, err := epIn.Read(resp)
+			ctxResp, cancelResp := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			n, err := epIn.ReadContext(ctxResp, resp)
+			cancelResp()
 			if err != nil {
 				errorCount++
 				consecutiveTimeouts++
