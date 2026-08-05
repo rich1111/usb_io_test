@@ -141,8 +141,16 @@ func runDaqLoop(ctx *gousb.Context) error {
 			case <-done:
 				return
 			default:
-				n, err := epIntr.Read(buf)
+				ctxIntr, cancelIntr := context.WithTimeout(context.Background(), 50*time.Millisecond)
+				n, err := epIntr.ReadContext(ctxIntr, buf)
+				cancelIntr()
+
 				if err != nil {
+					// 逾時處理: 若 50ms 內沒有中斷資料，則休眠 10ms 再試
+					if err == context.DeadlineExceeded || err.Error() == "usb: transfer timed out" {
+						time.Sleep(10 * time.Millisecond)
+						continue
+					}
 					log.Printf("[監聽者] 設備斷線或讀取中斷: %v\n", err)
 					return
 				}

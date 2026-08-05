@@ -11,6 +11,9 @@
 #include <pthread.h>
 #include <sys/time.h>
 #include <libusb-1.0/libusb.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #define VID 0x2207
 #define PID 0x0013
@@ -294,6 +297,9 @@ int run_daq_loop() {
 }
 
 int main() {
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+#endif
     printf("🚀 啟動 C USB Host 測試工具 (libusb)\n");
     
     signal(SIGINT, sig_handler);
