@@ -9,15 +9,19 @@ ifeq ($(UNAME_S),Darwin)
     CFLAGS += -mmacosx-version-min=$(MAC_VER)
 endif
 
-TARGET = usb_io_test_dodi
-SRC = usb_io_test_dodi.c
+TARGETS = usb_io_test_dodi usb_io_test_ai
+SRC_DODI = usb_io_test_dodi.c
+SRC_AI = usb_io_test_ai.c
 
-all: $(TARGET)
+all: $(TARGETS)
 
-$(TARGET): $(SRC)
+usb_io_test_dodi: $(SRC_DODI)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+usb_io_test_ai: $(SRC_AI)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGETS)
 
 .PHONY: all clean
