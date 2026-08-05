@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -147,7 +148,7 @@ func runDaqLoop(ctx *gousb.Context) error {
 
 				if err != nil {
 					// 逾時處理: 若 50ms 內沒有中斷資料，則休眠 10ms 再試
-					if err == context.DeadlineExceeded || err.Error() == "usb: transfer timed out" {
+					if err == context.DeadlineExceeded || strings.Contains(err.Error(), "timed out") || strings.Contains(err.Error(), "transfer was cancelled") {
 						time.Sleep(10 * time.Millisecond)
 						continue
 					}
