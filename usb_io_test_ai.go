@@ -17,12 +17,13 @@ import (
 )
 
 const (
-	VID           = 0x2207
-	PID           = 0x0013
-	UsbHeaderByte = 0xAA
-	UsbCmdReadAI  = 0x03
-	NumChannels   = 8
-	Iterations    = 500
+	VID             = 0x2207
+	PID             = 0x0013
+	UsbHeaderByte   = 0xAA
+	UsbCmdReadAI    = 0x03
+	UsbCmdSetAIMode = 0x08
+	NumChannels     = 8
+	Iterations      = 500
 )
 
 type AIData struct {
@@ -134,6 +135,40 @@ func runAILoop(ctx *gousb.Context) error {
 		dev.Close()
 		os.Exit(0)
 	}()
+
+	// =========================================================
+	// 初始化 AI 通道模式 (0x00: Voltage)
+	// =========================================================
+	fmt.Println("正在設定 AI 通道模式為 Voltage (0x00)...")
+	modeSetupSupported := true
+	for ch := 0; ch < NumChannels; ch++ {
+		if !modeSetupSupported {
+			break
+		}
+		cmdMode := []byte{UsbHeaderByte, UsbCmdSetAIMode, byte(ch), 0x00}
+		ctxMode, cancelMode := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		_, err := epOut.WriteContext(ctxMode, cmdMode)
+		cancelMode()
+		if err != nil {
+			fmt.Printf("⚠️ 警告: 通道 %d 模式設定寫入失敗: %v\n", ch, err)
+			continue
+		}
+
+		resp := make([]byte, 64)
+		ctxResp, cancelResp := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		n, err := epIn.ReadContext(ctxResp, resp)
+		cancelResp()
+		if err != nil {
+			fmt.Printf("⚠️ 警告: 通道 %d 模式設定超時/失敗 (%v)。\n", ch, err)
+			fmt.Println("   -> 可能是 RK3506 設備上的韌體尚未更新支援 0x08 指令。將跳過模式設定以避免中斷通訊。")
+			modeSetupSupported = false
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+		if n < 4 || resp[0] != UsbHeaderByte || resp[1] != UsbCmdSetAIMode {
+			fmt.Printf("⚠️ 警告: 通道 %d 模式設定可能未成功\n", ch)
+		}
+	}
 
 	fmt.Printf("\n[🚀 AI (Analog Input) 8 通道讀取測試] 準備執行 %d 次全通道循環...\n", Iterations)
 	fmt.Println("測試進行中，請稍候...\n")

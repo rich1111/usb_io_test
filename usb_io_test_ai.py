@@ -57,6 +57,31 @@ ep_in = usb.util.find_descriptor(
 ITERATIONS = 500    # 執行 500 次全通道循環
 NUM_CHANNELS = 8    # AI 通道數量 (0 ~ 7)
 
+# =========================================================
+# 初始化 AI 通道模式 (0x00: Voltage)
+# =========================================================
+print("正在設定 AI 通道模式為 Voltage (0x00)...")
+mode_setup_supported = True
+for ch in range(NUM_CHANNELS):
+    if not mode_setup_supported:
+        break
+    try:
+        packet_ai_mode = bytes([0xAA, 0x08, ch, 0x00])
+        ep_out.write(packet_ai_mode)
+        response = ep_in.read(64, timeout=200)
+        if len(response) < 4 or response[0] != 0xAA or response[1] != 0x08:
+            print(f"⚠️ 警告: 通道 {ch} 模式設定可能未成功")
+    except usb.core.USBError as e:
+        print(f"⚠️ 警告: 通道 {ch} 模式設定超時/失敗 ({e})。")
+        print("   -> 可能是 RK3506 設備上的韌體尚未更新支援 0x08 指令。將跳過模式設定以避免中斷通訊。")
+        mode_setup_supported = False
+        try:
+            ep_in.clear_halt()
+            ep_out.clear_halt()
+        except:
+            pass
+        time.sleep(0.5)
+
 success_count = 0
 error_count = 0
 total_bytes_transferred = 0

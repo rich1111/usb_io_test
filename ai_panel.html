@@ -138,6 +138,27 @@
             border-radius: 4px;
             border: 1px solid #333;
         }
+
+        .mode-badge {
+            background-color: #4CAF50;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            padding: 4px 8px;
+            font-size: 0.8rem;
+            margin-left: 10px;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+
+        .mode-badge.current {
+            background-color: #ff9800;
+        }
+
+        .mode-badge:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
     </style>
 </head>
 
@@ -172,6 +193,8 @@
         const PID = 0x0013;
         const UsbHeaderByte = 0xAA;
         const CmdReadAI = 0x03;
+        const CmdGetAIMode = 0x07;
+        const CmdSetAIMode = 0x08;
 
         // UI 長條圖顯示上限 (假設滿量程為 10.0，若您的感測器範圍不同可於此修改)
         const DisplayMaxVoltage = 10.0;
@@ -180,6 +203,7 @@
         let epOut = null, epIn = null;
         let isPolling = false;
         let pollTimer = null;
+        let channelModes = new Array(8).fill(0x00);
 
         const connectBtn = document.getElementById('connectBtn');
         const statusText = document.getElementById('status');
@@ -203,7 +227,10 @@
             grid.innerHTML += `
             <div class="ai-card" id="card-${i}">
                 <div class="ai-header">
-                    <div class="ai-title">Channel ${i}</div>
+                    <div class="ai-title">
+                        Ch ${i}
+                        <button id="mode-btn-${i}" class="mode-badge" onclick="toggleMode(${i})" disabled>?</button>
+                    </div>
                     <div class="ai-value" id="val-${i}">0.0000</div>
                 </div>
                 <div class="ai-raw-payload" id="payload-${i}">[00 00 00 00 00 00 00 00]</div>
@@ -212,6 +239,58 @@
                 </div>
             </div>
         `;
+        }
+
+        // --- 模式切換邏輯 ---
+        async function getChannelMode(ch) {
+            try {
+                const cmd = new Uint8Array([UsbHeaderByte, CmdGetAIMode, ch, 0x00]);
+                await usbDevice.transferOut(epOut, cmd);
+                const result = await usbDevice.transferIn(epIn, 64);
+                const data = new Uint8Array(result.data.buffer);
+                if (data.length >= 4 && data[0] === UsbHeaderByte && data[1] === CmdGetAIMode) {
+                    channelModes[ch] = data[3];
+                    updateModeUI(ch);
+                }
+            } catch(e) {
+                console.warn(`取得通道 ${ch} 模式失敗:`, e);
+            }
+        }
+
+        async function toggleMode(ch) {
+            if (!usbDevice || !epOut || !epIn) return;
+            const btn = document.getElementById(`mode-btn-${ch}`);
+            btn.disabled = true; // Disable during change
+            
+            let newMode = channelModes[ch] === 0x00 ? 0x02 : 0x00;
+            try {
+                const cmd = new Uint8Array([UsbHeaderByte, CmdSetAIMode, ch, newMode]);
+                await usbDevice.transferOut(epOut, cmd);
+                const result = await usbDevice.transferIn(epIn, 64);
+                const data = new Uint8Array(result.data.buffer);
+                if (data.length >= 4 && data[0] === UsbHeaderByte && data[1] === CmdSetAIMode) {
+                    channelModes[ch] = data[3];
+                    updateModeUI(ch);
+                    addLog(`🔄 通道 ${ch} 模式切換為: ${channelModes[ch] === 0x02 ? 'Current' : 'Voltage'}`);
+                }
+            } catch(e) {
+                addLog(`⚠️ 通道 ${ch} 模式切換失敗: ${e.message}`);
+                updateModeUI(ch); // restore state
+            }
+        }
+
+        function updateModeUI(ch) {
+            const btn = document.getElementById(`mode-btn-${ch}`);
+            if (btn) {
+                btn.disabled = false;
+                if (channelModes[ch] === 0x02) {
+                    btn.innerText = "mA (Current)";
+                    btn.className = "mode-badge current";
+                } else {
+                    btn.innerText = "V (Voltage)";
+                    btn.className = "mode-badge";
+                }
+            }
         }
 
         // --- WebUSB 連線 ---
@@ -261,6 +340,11 @@
                     statusText.style.color = "#00bcd4";
                     connectBtn.disabled = true;
                     addLog(`✅ AI 設備連線成功！開始解碼 Float64 數據...`);
+
+                    // 取得初始模式狀態
+                    for (let ch = 0; ch < 8; ch++) {
+                        await getChannelMode(ch);
+                    }
 
                     isPolling = true;
                     startPolling();

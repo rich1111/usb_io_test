@@ -17,6 +17,7 @@
 #define ITERATIONS 500
 #define USB_HEADER_BYTE 0xAA
 #define USB_CMD_READ_AI 0x03
+#define USB_CMD_SET_AI_MODE 0x08
 
 volatile bool keep_running = true;
 volatile bool is_connected = false;
@@ -131,6 +132,37 @@ int run_ai_loop() {
     
     is_connected = true;
     
+    // =========================================================
+    // 初始化 AI 通道模式 (0x00: Voltage)
+    // =========================================================
+    printf("正在設定 AI 通道模式為 Voltage (0x00)...\n");
+    bool mode_setup_supported = true;
+    for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+        if (!mode_setup_supported) break;
+        unsigned char cmd_mode[] = {USB_HEADER_BYTE, USB_CMD_SET_AI_MODE, ch, 0x00};
+        int actual_len = 0;
+        int r_mode = libusb_bulk_transfer(dev_handle, ep_out, cmd_mode, sizeof(cmd_mode), &actual_len, 200);
+        if (r_mode != 0) {
+            printf("⚠️ 警告: 通道 %d 模式設定寫入失敗: %s\n", ch, libusb_error_name(r_mode));
+            continue;
+        }
+
+        unsigned char resp_mode[64];
+        r_mode = libusb_bulk_transfer(dev_handle, ep_in, resp_mode, sizeof(resp_mode), &actual_len, 200);
+        if (r_mode != 0) {
+            printf("⚠️ 警告: 通道 %d 模式設定超時/失敗 (%s)。\n", ch, libusb_error_name(r_mode));
+            printf("   -> 可能是 RK3506 設備上的韌體尚未更新支援 0x08 指令。將跳過模式設定以避免中斷通訊。\n");
+            mode_setup_supported = false;
+            libusb_clear_halt(dev_handle, ep_in);
+            libusb_clear_halt(dev_handle, ep_out);
+            usleep(500000); // 0.5s
+            continue;
+        }
+        if (actual_len < 4 || resp_mode[0] != USB_HEADER_BYTE || resp_mode[1] != USB_CMD_SET_AI_MODE) {
+            printf("⚠️ 警告: 通道 %d 模式設定可能未成功\n", ch);
+        }
+    }
+
     printf("\n[🚀 AI (Analog Input) 8 通道讀取測試] 準備執行 %d 次全通道循環...\n", ITERATIONS);
     printf("測試進行中，請稍候...\n\n");
     
