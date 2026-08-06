@@ -168,6 +168,7 @@
 
     <div class="control-panel">
         <button id="connectBtn">🔌 連接 RK3506 設備</button>
+        <button id="disconnectBtn" disabled style="background-color: #f44336; color: white;">🛑 中斷連線</button>
         <span id="status" style="color: #f44336; font-weight: bold;">● 未連線</span>
         <div style="margin-left: auto;">
             <label for="pollRate">採集頻率: </label>
@@ -206,6 +207,7 @@
         let channelModes = new Array(8).fill(0x00);
 
         const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
         const statusText = document.getElementById('status');
         const logDiv = document.getElementById('log');
         const pollRateSelect = document.getElementById('pollRate');
@@ -339,6 +341,7 @@
                     statusText.innerHTML = `● 雙精度浮點採集中 (Intf ${targetIntfNum})`;
                     statusText.style.color = "#00bcd4";
                     connectBtn.disabled = true;
+                    disconnectBtn.disabled = false;
                     addLog(`✅ AI 設備連線成功！開始解碼 Float64 數據...`);
 
                     // 取得初始模式狀態
@@ -353,6 +356,44 @@
                 }
             } catch (error) {
                 addLog(`❌ 連線失敗: ${error.message}`);
+            }
+        });
+
+        // --- 中斷連線 ---
+        disconnectBtn.addEventListener('click', async () => {
+            if (!usbDevice) return;
+            
+            isPolling = false;
+            if (pollTimer) {
+                clearTimeout(pollTimer);
+                pollTimer = null;
+            }
+            
+            try {
+                await usbDevice.close();
+                addLog("🛑 已中斷連線並釋放 USB 資源");
+            } catch (e) {
+                addLog(`⚠️ 中斷連線時發生錯誤: ${e}`);
+            }
+            
+            usbDevice = null;
+            epOut = null;
+            epIn = null;
+            
+            statusText.innerHTML = "● 未連線";
+            statusText.style.color = "#f44336";
+            connectBtn.disabled = false;
+            disconnectBtn.disabled = true;
+            
+            document.querySelectorAll('.ai-card').forEach(c => c.classList.remove('active'));
+            // 恢復模式按鈕狀態
+            for(let ch = 0; ch < 8; ch++){
+                const btn = document.getElementById(`mode-btn-${ch}`);
+                if(btn){
+                    btn.disabled = true;
+                    btn.innerText = "?";
+                    btn.className = "mode-badge";
+                }
             }
         });
 
