@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebUSB DI/DO 終極控制面板 (狀態同步版)</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #1e1e1e;
+            color: #fff;
+            padding: 20px;
+        }
+
+        h2 {
+            color: #00bcd4;
+            border-bottom: 1px solid #333;
+            padding-bottom: 10px;
+        }
+
+        .panel {
+            background-color: #2d2d2d;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+
+        button.action-btn {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 5px;
+            transition: background 0.2s;
+        }
+
+        button.action-btn:hover {
+            background-color: #45a049;
+        }
+
+        button.action-btn:disabled {
+            background-color: #555;
+            cursor: not-allowed;
+        }
+
+        .io-row {
+            display: flex;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .io-label {
+            width: 60px;
+            font-weight: bold;
+        }
+
+        /* 數位輸出 (DO) 開關樣式：青藍光效 */
+        .do-btn {
+            background-color: #333;
+            color: #aaa;
+            width: 80px;
+            padding: 8px;
+            border: 2px solid #555;
+            border-radius: 4px;
+            transition: all 0.2s;
+            cursor: pointer;
+        }
+
+        .do-btn.active {
+            background-color: #00bcd4;
+            border-color: #00bcd4;
+            color: #000;
+            box-shadow: 0 0 15px #00bcd4;
+            font-weight: bold;
+        }
+
+        /* 數位輸入 (DI) 燈號樣式 */
+        .di-led {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background-color: #333;
+            border: 2px solid #555;
+            margin-left: 20px;
+            transition: all 0.1s;
+        }
+
+        .di-led.active {
+            background-color: #00bcd4;
+            border-color: #00bcd4;
+            box-shadow: 0 0 15px #00bcd4;
+        }
+
+        #log {
+            background-color: #000;
+            color: #0f0;
+            font-family: monospace;
+            padding: 10px;
+            height: 200px;
+            overflow-y: auto;
+            border-radius: 4px;
+            border: 1px solid #444;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h2>🚀 8-Ch DI/DO 數位訊號即時控制台</h2>
+
+    <div class="panel" style="display: flex; align-items: center;">
+        <button id="connectBtn" class="action-btn">🔌 連接 RK3506 設備</button>
+        <button id="disconnectBtn" class="action-btn" style="background-color: #f44336; display: none;">🛑 斷開連線</button>
+        <span id="status" style="margin-left: 15px; color: #f44336; font-weight: bold;">● 未連線</span>
+    </div>
+
+    <div style="display: flex; gap: 20px;">
+        <div class="panel" style="flex: 1;">
+            <h3 style="color: #aaa;">數位輸出 (DO 控制)</h3>
+            <div id="do-container"></div>
+        </div>
+
+        <div class="panel" style="flex: 1;">
+            <h3 style="color: #aaa;">數位輸入 (DI 狀態)</h3>
+            <div id="di-container"></div>
+        </div>
+    </div>
+
+    <div class="panel">
+        <h3 style="margin-top: 0; color: #aaa;">中斷與系統日誌</h3>
+        <div id="log"></div>
+    </div>
+
+    <script>
+        const VID = 0x2207;
+        const PID = 0x0013;
+        const UsbHeaderByte = 0xAA;
+        const CmdReadDO = 0x05;
+        const CmdReadAO = 0x06;
+
+        let usbDevice = null;
+        let epOut = null, epIn = null, epIntr = null;
+        let claimedInterfaceNum = -1;
+
+        const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+        const statusText = document.getElementById('status');
+        const logDiv = document.getElementById('log');
+
+        function addLog(msg) {
+            const time = new Date().toLocaleTimeString();
+            logDiv.innerHTML += `[${time}] ${msg}<br>`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        // 建立 UI
+        for (let i = 0; i < 8; i++) {
+            const doDiv = document.createElement('div');
+            doDiv.className = 'io-row';
+            doDiv.innerHTML = `<span class="io-label">DO ${i}</span>
+                           <button class="do-btn" id="do-btn-${i}" onclick="toggleDO(${i})">OFF</button>`;
+            document.getElementById('do-container').appendChild(doDiv);
+
+            const diDiv = document.createElement('div');
+            diDiv.className = 'io-row';
+            diDiv.innerHTML = `<span class="io-label">DI ${i}</span>
+                           <div class="di-led" id="di-led-${i}"></div>`;
+            document.getElementById('di-container').appendChild(diDiv);
+        }
+
+        // --- 連線邏輯 ---
+        connectBtn.addEventListener('click', async () => {
+            try {
+                addLog("請求 USB 設備權限...");
+                usbDevice = await navigator.usb.requestDevice({ filters: [{ vendorId: VID }] });
+
+                await usbDevice.open();
+                await usbDevice.selectConfiguration(1);
+
+                let targetIntfNum = -1;
+
+                for (const intf of usbDevice.configuration.interfaces) {
+                    for (const alt of intf.alternates) {
+                        if (alt.interfaceClass === 255) {
+                            let tempOut = null, tempIn = null, tempIntr = null;
+
+                            alt.endpoints.forEach(ep => {
+                                if (ep.direction === 'out' && ep.type === 'bulk') tempOut = ep.endpointNumber;
+                                if (ep.direction === 'in' && ep.type === 'bulk') tempIn = ep.endpointNumber;
+                                if (ep.direction === 'in' && ep.type === 'interrupt') tempIntr = ep.endpointNumber;
+                            });
+
+                            if (tempOut !== null && tempIn !== null && tempIntr !== null) {
+                                targetIntfNum = intf.interfaceNumber;
+                                epOut = tempOut;
+                                epIn = tempIn;
+                                epIntr = tempIntr;
+                                break;
+                            }
+                        }
+                    }
+                    if (targetIntfNum !== -1) break;
+                }
+
+                if (targetIntfNum === -1) throw new Error("找不到具備 Interrupt 端點的 DI/DO 介面！");
+
+                await usbDevice.claimInterface(targetIntfNum);
+                claimedInterfaceNum = targetIntfNum;
+
+                statusText.innerHTML = `● 已連線 (Intf ${targetIntfNum})`;
+                statusText.style.color = "#00bcd4";
+                connectBtn.style.display = 'none';
+                disconnectBtn.style.display = 'inline-block';
+
+                addLog(`✅ 成功接管設備！端點配置 - OUT:${epOut}, IN:${epIn}, INTR:${epIntr}`);
+
+                // 啟動硬體背景監聽
+                startInterruptListener();
+
+                addLog("正在讀取硬體當前輸出 (DO) 狀態並同步 UI...");
+                for (let i = 0; i < 8; i++) {
+                    await readDO(i);
+                    await new Promise(resolve => setTimeout(resolve, 10));
+                }
+
+                addLog("正在讀取硬體當前輸入 (DI) 狀態並同步 UI...");
+                for (let i = 0; i < 8; i++) {
+                    await readDI(i);
+                    await new Promise(resolve => setTimeout(resolve, 10));
+                }
+
+                addLog("所有硬體狀態同步完成！");
+
+            } catch (error) {
+                addLog(`❌ 連線失敗: ${error.message}`);
+            }
+        });
+
+        // --- 斷線邏輯 ---
+        disconnectBtn.addEventListener('click', async () => {
+            if (usbDevice && usbDevice.opened) {
+                try {
+                    if (claimedInterfaceNum !== -1) {
+                        await usbDevice.releaseInterface(claimedInterfaceNum);
+                    }
+                    await usbDevice.close();
+                    addLog("🛑 已安全斷開 USB 連線並釋放設備控制權。");
+
+                    statusText.innerHTML = "● 未連線";
+                    statusText.style.color = "#f44336";
+                    connectBtn.style.display = 'inline-block';
+                    disconnectBtn.style.display = 'none';
+                } catch (error) {
+                    addLog(`⚠️ 斷線時發生錯誤: ${error}`);
+                }
+            }
+        });
+
+        // --- DO 寫入邏輯 (加入 ACK 清空機制) ---
+        async function toggleDO(channel) {
+            if (!usbDevice || !usbDevice.opened) return;
+            const btn = document.getElementById(`do-btn-${channel}`);
+            const isCurrentlyOff = btn.innerText === "OFF";
+            const targetState = isCurrentlyOff ? 1 : 0;
+
+            try {
+                // 1. 發送寫入指令 (Bulk OUT)
+                const data = new Uint8Array([UsbHeaderByte, 0x02, channel, targetState]);
+                await usbDevice.transferOut(epOut, data);
+
+                // 🌟 2. 關鍵修復：讀取並清空硬體回傳的 ACK 封包 (Bulk IN)
+                // 這樣才能釋放 MCU 的緩衝區，防止下一次點擊時發生死鎖！
+                await usbDevice.transferIn(epIn, 64);
+
+                // 3. 更新 UI 介面
+                btn.innerText = isCurrentlyOff ? "ON" : "OFF";
+                btn.className = isCurrentlyOff ? "do-btn active" : "do-btn";
+                addLog(`寫入 DO ${channel} -> ${targetState === 1 ? 'HIGH' : 'LOW'}`);
+            } catch (error) {
+                addLog(`⚠️ 寫入 DO ${channel} 失敗: ${error}`);
+            }
+        }
+
+        // --- 主動讀取 DO 當前硬體狀態並同步 UI ---
+        async function readDO(channel) {
+            if (!usbDevice || !usbDevice.opened) return;
+            try {
+                const cmd = new Uint8Array([UsbHeaderByte, CmdReadDO, channel, 0x00]);
+                await usbDevice.transferOut(epOut, cmd);
+                
+                const result = await usbDevice.transferIn(epIn, 64);
+                const data = new Uint8Array(result.data.buffer);
+                
+                if (data[0] === UsbHeaderByte && data[1] === CmdReadDO && data[2] === channel) {
+                    const state = data[3];
+                    const btn = document.getElementById(`do-btn-${channel}`);
+                    if (btn) {
+                        btn.innerText = state === 1 ? "ON" : "OFF";
+                        btn.className = state === 1 ? "do-btn active" : "do-btn";
+                    }
+                }
+            } catch (error) {
+                if (usbDevice.opened) addLog(`⚠️ 讀取 DO ${channel} 失敗`);
+            }
+        }
+
+        // --- 主動讀取 AO 當前硬體輸出並同步 UI (如果您有實作 AO 面板) ---
+        async function readAO(channel) {
+            if (!usbDevice || !usbDevice.opened) return;
+            try {
+                const cmd = new Uint8Array([UsbHeaderByte, CmdReadAO, channel, 0x00]);
+                await usbDevice.transferOut(epOut, cmd);
+                
+                const result = await usbDevice.transferIn(epIn, 64);
+                const data = new Uint8Array(result.data.buffer);
+                
+                if (data.length >= 11 && data[0] === UsbHeaderByte && data[1] === CmdReadAO && data[2] === channel) {
+                    const dataView = new DataView(data.buffer, data.byteOffset, data.byteLength);
+                    const aoValue = dataView.getFloat64(3, true);
+                    
+                    const aoLabel = document.getElementById(`val-ao-${channel}`);
+                    if (aoLabel) {
+                        aoLabel.innerText = aoValue.toFixed(4) + " V";
+                    }
+                }
+            } catch (error) {
+                if (usbDevice.opened) addLog(`⚠️ 讀取 AO ${channel} 失敗`);
+            }
+        }
+
+        // --- DI 讀取邏輯 ---
+        async function readDI(channel) {
+            if (!usbDevice || !usbDevice.opened) return;
+            try {
+                const cmd = new Uint8Array([UsbHeaderByte, 0x01, channel, 0x00]);
+                await usbDevice.transferOut(epOut, cmd);
+
+                const result = await usbDevice.transferIn(epIn, 64);
+                const data = new Uint8Array(result.data.buffer);
+
+                if (data[0] === UsbHeaderByte && data[1] === 0x01 && data[2] === channel) {
+                    const state = data[3];
+                    // 更新 DI 燈號
+                    updateDiUI(channel, state);
+                }
+            } catch (error) {
+                if (usbDevice.opened) addLog(`⚠️ 讀取 DI ${channel} 失敗`);
+            }
+        }
+
+        // --- DI 中斷監聽 ---
+        async function startInterruptListener() {
+            addLog("⚡ 啟動硬體中斷 (Interrupt) 狀態改變監聽...");
+            while (usbDevice && usbDevice.opened) {
+                try {
+                    const result = await usbDevice.transferIn(epIntr, 64);
+                    const data = new Uint8Array(result.data.buffer);
+
+                    if (data.length >= 3 && data[0] === 0xBB) {
+                        const channel = data[1];
+                        const state = data[2];
+                        updateDiUI(channel, state);
+
+                        addLog(`⚡ [中斷推播] DI ${channel} 狀態改變 -> ${state === 1 ? 'HIGH' : 'LOW'}`);
+                    }
+                } catch (error) {
+                    if (usbDevice.opened) addLog(`監聽中止或超時: ${error}`);
+                    break;
+                }
+            }
+        }
+
+        function updateDiUI(channel, state) {
+            const led = document.getElementById(`di-led-${channel}`);
+            if (state === 1) {
+                led.classList.add('active');
+            } else {
+                led.classList.remove('active');
+            }
+        }
+    </script>
+</body>
+
+</html>
