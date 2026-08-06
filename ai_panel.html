@@ -338,7 +338,9 @@
                 });
 
                 if (epOut && epIn) {
-                    statusText.innerHTML = `● 雙精度浮點採集中 (Intf ${targetIntfNum})`;
+                    const devName = usbDevice.productName || 'RK3506 Device';
+                    const devSn = usbDevice.serialNumber || 'N/A';
+                    statusText.innerHTML = `● 已連接: ${devName} (SN: ${devSn})`;
                     statusText.style.color = "#00bcd4";
                     connectBtn.disabled = true;
                     disconnectBtn.disabled = false;
