@@ -38,7 +38,7 @@ def ai_test_loop(ep_out, ep_in):
         try:
             packet_ai_mode = bytes([0xAA, 0x08, ch, 0x00])
             ep_out.write(packet_ai_mode)
-            response = ep_in.read(64, timeout=200)
+            response = ep_in.read(64, timeout=500)
             if len(response) < 4 or response[0] != 0xAA or response[1] != 0x08:
                 print(f"⚠️ 警告: 通道 {ch} 模式設定可能未成功")
         except usb.core.USBError as e:
@@ -56,33 +56,37 @@ def ai_test_loop(ep_out, ep_in):
     total_bytes_transferred = 0
     latest_ai_data = {ch: {"val": 0.0, "payload": []} for ch in range(NUM_CHANNELS)}
 
-    print(f"\n[🚀 AI (Analog Input) 8 通道讀取測試] 準備執行 {ITERATIONS} 次全通道循環...")
     start_time = time.perf_counter()
 
-    for i in range(ITERATIONS):
-        if i > 0 and i % 50 == 0:
-            print(f"目前進度: {i} / {ITERATIONS} 全通道循環...")
+    try:
+        for i in range(ITERATIONS):
+            if i > 0 and i % 50 == 0:
+                print(f"目前進度: {i} / {ITERATIONS} 全通道循環...")
 
-        for ch in range(NUM_CHANNELS):
-            try:
-                packet_ai_read = bytes([0xAA, 0x03, ch, 0x00])
-                ep_out.write(packet_ai_read)
-                response = ep_in.read(64, timeout=100)
-                
-                if len(response) >= 11 and response[0] == 0xAA and response[1] == 0x03:
-                    success_count += 1
-                    total_bytes_transferred += (len(packet_ai_read) + len(response))
-                    ai_bytes = bytearray(response[3:11])
-                    ai_value = struct.unpack('<d', ai_bytes)[0]
-                    latest_ai_data[ch] = {"val": ai_value, "payload": list(response[3:11])}
-                else:
+            for ch in range(NUM_CHANNELS):
+                try:
+                    packet_ai_read = bytes([0xAA, 0x03, ch, 0x00])
+                    ep_out.write(packet_ai_read)
+                    response = ep_in.read(64, timeout=500)
+                    
+                    if len(response) >= 11 and response[0] == 0xAA and response[1] == 0x03:
+                        success_count += 1
+                        total_bytes_transferred += (len(packet_ai_read) + len(response))
+                        ai_bytes = bytearray(response[3:11])
+                        ai_value = struct.unpack('<d', ai_bytes)[0]
+                        latest_ai_data[ch] = {"val": ai_value, "payload": list(response[3:11])}
+                    else:
+                        error_count += 1
+                    time.sleep(0.001)
+
+                except usb.core.USBError as e:
                     error_count += 1
-                time.sleep(0.001)
+                    print(f"[USB 錯誤] AI 通道 {ch} 傳輸失敗: {e}")
 
-            except usb.core.USBError as e:
-                error_count += 1
-                print(f"[USB 錯誤] AI 通道 {ch} 傳輸失敗: {e}")
-
+    except usb.core.USBError as e:
+        print(f"\n💥 [主程式] 偵測到 USB 斷線 ({e})")
+        raise e
+        
     end_time = time.perf_counter()
 
     total_time = end_time - start_time
@@ -119,6 +123,7 @@ def dodi_test_loop(ep_out, ep_in, ep_intr):
 
     is_connected = True
     def listen_for_interrupts():
+        nonlocal is_connected
         print("[監聽者] DI 狀態中斷監聽已啟動...")
         while is_connected:
             try:
@@ -126,6 +131,8 @@ def dodi_test_loop(ep_out, ep_in, ep_intr):
                 if len(data) >= 3 and data[0] == 0xBB:
                     print(f"  ⚡ [中斷推播] DI {data[1]} -> {data[2]}")
             except usb.core.USBError as e:
+                if not is_connected:
+                    break
                 if e.errno in (60, 110) or 'timed out' in str(e).lower() or 'timeout' in str(e).lower():
                     time.sleep(0.01)
                     continue
@@ -159,14 +166,14 @@ def dodi_test_loop(ep_out, ep_in, ep_intr):
                     target_state = (i + ch) % 2 
                     packet_do_write = bytes([0xAA, 0x02, ch, target_state])
                     ep_out.write(packet_do_write)
-                    resp_do = ep_in.read(64, timeout=50)
+                    resp_do = ep_in.read(64, timeout=500)
                     total_bytes_transferred += (len(packet_do_write) + len(resp_do))
 
                     time.sleep(0.01) 
 
                     packet_di_read = bytes([0xAA, 0x01, ch, 0x00])
                     ep_out.write(packet_di_read)
-                    resp_di = ep_in.read(64, timeout=50)
+                    resp_di = ep_in.read(64, timeout=500)
                     total_bytes_transferred += (len(packet_di_read) + len(resp_di))
 
                     if len(resp_do) >= 4 and len(resp_di) >= 4:
@@ -222,6 +229,7 @@ def dodi_test_loop(ep_out, ep_in, ep_intr):
 
     except usb.core.USBError as e:
         print(f"\n💥 [主程式] 偵測到 USB 斷線 ({e})")
+        raise e
     finally:
         is_connected = False
 
@@ -278,16 +286,28 @@ def main():
     try:
         print("🔍 正在向設備發送 UsbCmdGetBoardType (0x0B)...")
         cmd = bytearray([USB_HEADER_BYTE, USB_CMD_GET_BOARD_TYPE, 0x00, 0x00])
-        ep_out.write(cmd, timeout=500)
-        resp = ep_in.read(64, timeout=500)
-        
         board_id = 255
-        if len(resp) >= 4 and resp[0] == USB_HEADER_BYTE and resp[1] == USB_CMD_GET_BOARD_TYPE:
-            board_id = resp[3]
+        found_board = False
+        
+        for attempt in range(1, 6):
+            try:
+                ep_out.write(cmd, timeout=500)
+                resp = ep_in.read(64, timeout=500)
+                
+                if len(resp) >= 4 and resp[0] == USB_HEADER_BYTE and resp[1] == USB_CMD_GET_BOARD_TYPE:
+                    board_id = resp[3]
+                    found_board = True
+                    break
+                else:
+                    time.sleep(0.01)
+            except usb.core.USBError:
+                time.sleep(0.01)
+                
+        if found_board:
             board_name = BOARD_TYPES.get(board_id, f"未知型號 ({board_id})")
             print(f"✅ 成功獲取！RK3506 設備回報之 I/O Board Type 為: {board_name} (ID: {board_id})")
         else:
-            print(f"⚠️ 設備回應格式異常，收到資料長度: {len(resp)} Bytes")
+            print("⚠️ 設備回應格式異常，已達最大重試次數")
             raise ValueError("無法讀取 Board Type")
 
         if board_id in [5, 6, 7]:
@@ -318,6 +338,7 @@ if __name__ == '__main__':
     while True:
         try:
             main()
+            print("\n✅ 測試圓滿結束！程式安全退出。")
             break
         except ValueError as ve:
             time.sleep(1)

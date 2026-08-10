@@ -100,7 +100,7 @@ void run_ai_loop(libusb_device_handle *dev_handle, uint8_t ep_out, uint8_t ep_in
         }
         
         unsigned char resp[64];
-        r = libusb_bulk_transfer(dev_handle, ep_in, resp, sizeof(resp), &actual_len, 200);
+        r = libusb_bulk_transfer(dev_handle, ep_in, resp, sizeof(resp), &actual_len, 500);
         if (r != 0 || actual_len < 4 || resp[0] != USB_HEADER_BYTE || resp[1] != USB_CMD_SET_AI_MODE) {
             printf("⚠️ 警告: 通道 %d 模式設定回應異常\n", ch);
         }
@@ -119,7 +119,7 @@ void run_ai_loop(libusb_device_handle *dev_handle, uint8_t ep_out, uint8_t ep_in
         for (int ch = 0; ch < NUM_CHANNELS && keep_running; ch++) {
             unsigned char cmd_read[] = {USB_HEADER_BYTE, USB_CMD_READ_AI, ch, 0x00};
             int actual_len = 0;
-            int r = libusb_bulk_transfer(dev_handle, ep_out, cmd_read, 4, &actual_len, 100);
+            int r = libusb_bulk_transfer(dev_handle, ep_out, cmd_read, 4, &actual_len, 500);
             if (r != 0) {
                 error_count++;
                 printf("[USB 錯誤] AI 通道 %d 寫入失敗\n", ch);
@@ -127,7 +127,7 @@ void run_ai_loop(libusb_device_handle *dev_handle, uint8_t ep_out, uint8_t ep_in
             }
             
             unsigned char resp[64];
-            r = libusb_bulk_transfer(dev_handle, ep_in, resp, sizeof(resp), &actual_len, 100);
+            r = libusb_bulk_transfer(dev_handle, ep_in, resp, sizeof(resp), &actual_len, 500);
             if (r == 0 && actual_len >= 11 && resp[0] == USB_HEADER_BYTE && resp[1] == USB_CMD_READ_AI) {
                 success_count++;
                 double val;
@@ -191,21 +191,21 @@ void run_dodi_loop(libusb_device_handle *dev_handle, uint8_t ep_out, uint8_t ep_
             
             unsigned char cmd_do[] = {USB_HEADER_BYTE, USB_CMD_WRITE_DO, ch, target_state};
             int actual_len = 0;
-            int r = libusb_bulk_transfer(dev_handle, ep_out, cmd_do, 4, &actual_len, 50);
+            int r = libusb_bulk_transfer(dev_handle, ep_out, cmd_do, 4, &actual_len, 500);
             if (r != 0) goto dodi_error;
             
             unsigned char resp_do[64];
-            r = libusb_bulk_transfer(dev_handle, ep_in, resp_do, sizeof(resp_do), &actual_len, 50);
+            r = libusb_bulk_transfer(dev_handle, ep_in, resp_do, sizeof(resp_do), &actual_len, 500);
             if (r != 0) goto dodi_error;
             
             usleep(10000); // 10ms settling time
             
             unsigned char cmd_di[] = {USB_HEADER_BYTE, USB_CMD_READ_DI, ch, 0x00};
-            r = libusb_bulk_transfer(dev_handle, ep_out, cmd_di, 4, &actual_len, 50);
+            r = libusb_bulk_transfer(dev_handle, ep_out, cmd_di, 4, &actual_len, 500);
             if (r != 0) goto dodi_error;
             
             unsigned char resp_di[64];
-            r = libusb_bulk_transfer(dev_handle, ep_in, resp_di, sizeof(resp_di), &actual_len, 50);
+            r = libusb_bulk_transfer(dev_handle, ep_in, resp_di, sizeof(resp_di), &actual_len, 500);
             if (r != 0) goto dodi_error;
             
             if (actual_len >= 4 && resp_di[0] == USB_HEADER_BYTE && resp_di[1] == USB_CMD_READ_DI) {
@@ -331,17 +331,33 @@ int main_loop(libusb_context *ctx) {
     printf("🔍 正在向設備發送 UsbCmdGetBoardType (0x0B)...\n");
     unsigned char cmd[4] = {USB_HEADER_BYTE, USB_CMD_GET_BOARD_TYPE, 0x00, 0x00};
     int actual_len;
-    r = libusb_bulk_transfer(dev_handle, ep_out, cmd, 4, &actual_len, 500);
-    
-    unsigned char resp[64];
-    r = libusb_bulk_transfer(dev_handle, ep_in, resp, sizeof(resp), &actual_len, 500);
-    
     uint8_t board_id = 255;
-    if (r == 0 && actual_len >= 4 && resp[0] == USB_HEADER_BYTE && resp[1] == USB_CMD_GET_BOARD_TYPE) {
-        board_id = resp[3];
+    bool found_board = false;
+    
+    for (int attempt = 1; attempt <= 5; attempt++) {
+        r = libusb_bulk_transfer(dev_handle, ep_out, cmd, 4, &actual_len, 500);
+        if (r != 0) {
+            printf("❌ 寫入板卡型號請求失敗 (嘗試 %d/5)\n", attempt);
+            continue;
+        }
+        
+        unsigned char resp[64];
+        r = libusb_bulk_transfer(dev_handle, ep_in, resp, sizeof(resp), &actual_len, 500);
+        
+        if (r == 0 && actual_len >= 4 && resp[0] == USB_HEADER_BYTE && resp[1] == USB_CMD_GET_BOARD_TYPE) {
+            board_id = resp[3];
+            found_board = true;
+            break;
+        } else {
+            // Probably stale data from previous run, let loop retry
+            usleep(10000);
+        }
+    }
+
+    if (found_board) {
         printf("✅ 成功獲取！RK3506 設備回報之 I/O Board Type 為: %s (ID: %d)\n", get_board_name(board_id), board_id);
     } else {
-        printf("❌ 無法獲取板卡型號\n");
+        printf("❌ 無法獲取板卡型號，已達最大重試次數\n");
         libusb_release_interface(dev_handle, target_intf);
         libusb_close(dev_handle);
         return 1;
@@ -376,9 +392,10 @@ int main() {
         if (ret == 0) {
             printf("\n✅ 測試圓滿結束！程式安全退出。\n");
             break;
-        }
-        if (keep_running) {
-            sleep(1);
+        } else {
+            printf("\n💥 發生錯誤或斷線 (Error code %d)\n", ret);
+            printf("⏳ 5秒後重新嘗試連線...\n");
+            sleep(4);
         }
     }
 

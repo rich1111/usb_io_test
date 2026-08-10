@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -66,7 +67,7 @@ func runUnifiedLoop(ctx *gousb.Context) error {
 	}
 	if dev == nil {
 		time.Sleep(1 * time.Second)
-		return nil
+		return fmt.Errorf("找不到 RK3506 設備")
 	}
 	defer dev.Close()
 
@@ -135,31 +136,39 @@ func runUnifiedLoop(ctx *gousb.Context) error {
 	fmt.Println("🔍 正在向設備發送 UsbCmdGetBoardType (0x0B)...")
 	cmd := []byte{UsbHeaderByte, UsbCmdGetBoardType, 0x00, 0x00}
 	
-	ctxOut, cancelOut := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancelOut()
-	_, err = epOutBulk.WriteContext(ctxOut, cmd)
-	if err != nil {
-		return fmt.Errorf("寫入指令失敗: %v", err)
-	}
-
-	resp := make([]byte, 64)
-	ctxIn, cancelIn := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancelIn()
-	n, err := epIn.ReadContext(ctxIn, resp)
-	if err != nil {
-		return fmt.Errorf("讀取回應失敗: %v", err)
-	}
-
 	boardID := byte(255)
-	if n >= 4 && resp[0] == UsbHeaderByte && resp[1] == UsbCmdGetBoardType {
-		boardID = resp[3]
+	foundBoard := false
+	for attempt := 1; attempt <= 5; attempt++ {
+		ctxOut, cancelOut := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		_, err = epOutBulk.WriteContext(ctxOut, cmd)
+		cancelOut()
+		if err != nil {
+			return fmt.Errorf("寫入指令失敗: %v", err)
+		}
+
+		resp := make([]byte, 64)
+		ctxIn, cancelIn := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		n, rErr := epIn.ReadContext(ctxIn, resp)
+		cancelIn()
+		if rErr != nil {
+			continue // ignore timeout to flush
+		}
+
+		if n >= 4 && resp[0] == UsbHeaderByte && resp[1] == UsbCmdGetBoardType {
+			boardID = resp[3]
+			foundBoard = true
+			break
+		}
+	}
+
+	if foundBoard {
 		name, ok := boardTypes[boardID]
 		if !ok {
 			name = fmt.Sprintf("未知型號 (%d)", boardID)
 		}
 		fmt.Printf("✅ 成功獲取！RK3506 設備回報之 I/O Board Type 為: %s (ID: %d)\n", name, boardID)
 	} else {
-		return fmt.Errorf("無法獲取板卡型號")
+		return fmt.Errorf("無法獲取板卡型號，已達最大重試次數")
 	}
 
 	if boardID >= 5 && boardID <= 7 {
@@ -206,6 +215,7 @@ func runAILoop(epOut *gousb.OutEndpoint, epIn *gousb.InEndpoint) error {
 
 	successCount := 0
 	errorCount := 0
+	timeoutConsecutive := 0
 	var totalBytesTransferred int64 = 0
 
 	type AIData struct {
@@ -224,25 +234,35 @@ func runAILoop(epOut *gousb.OutEndpoint, epIn *gousb.InEndpoint) error {
 
 		for ch := 0; ch < NumChannels; ch++ {
 			packetRead := []byte{UsbHeaderByte, UsbCmdReadAI, byte(ch), 0x00}
-			ctxW, cancelW := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			ctxW, cancelW := context.WithTimeout(context.Background(), 500*time.Millisecond)
 			wN, wErr := epOut.WriteContext(ctxW, packetRead)
 			cancelW()
 			if wErr != nil {
 				errorCount++
+				timeoutConsecutive++
 				fmt.Printf("[USB 錯誤] AI 通道 %d 寫入失敗: %v\n", ch, wErr)
+				if timeoutConsecutive >= 8 {
+					return fmt.Errorf("偵測到 Bulk 通道連續超時失去回應！")
+				}
 				continue
 			}
 			totalBytesTransferred += int64(wN)
 
 			resp := make([]byte, 64)
-			ctxR, cancelR := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			ctxR, cancelR := context.WithTimeout(context.Background(), 500*time.Millisecond)
 			rN, rErr := epIn.ReadContext(ctxR, resp)
 			cancelR()
 			if rErr != nil {
 				errorCount++
+				timeoutConsecutive++
 				fmt.Printf("[USB 錯誤] AI 通道 %d 讀取超時: %v\n", ch, rErr)
+				if timeoutConsecutive >= 8 {
+					return fmt.Errorf("偵測到 Bulk 通道連續超時失去回應！")
+				}
 				continue
 			}
+
+			timeoutConsecutive = 0
 
 			if rN >= 11 && resp[0] == UsbHeaderByte && resp[1] == UsbCmdReadAI {
 				successCount++
@@ -302,7 +322,8 @@ func runDODILoop(epOut *gousb.OutEndpoint, epIn *gousb.InEndpoint, epIntr *gousb
 				n, err := epIntr.ReadContext(ctxIntr, buf)
 				cancel()
 				if err != nil {
-					if err == context.DeadlineExceeded || err.Error() == "libusb: timeout [code -7]" {
+					errStr := err.Error()
+					if err == context.DeadlineExceeded || strings.Contains(errStr, "timeout") || strings.Contains(errStr, "cancelled") || strings.Contains(errStr, "DeadlineExceeded") {
 						time.Sleep(10 * time.Millisecond)
 						continue
 					}
@@ -337,7 +358,7 @@ func runDODILoop(epOut *gousb.OutEndpoint, epIn *gousb.InEndpoint, epIntr *gousb
 			targetState := byte((i + ch) % 2)
 			packetDOWrite := []byte{UsbHeaderByte, UsbCmdWriteDO, byte(ch), targetState}
 
-			ctxW, cancelW := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			ctxW, cancelW := context.WithTimeout(context.Background(), 500*time.Millisecond)
 			_, wErr := epOut.WriteContext(ctxW, packetDOWrite)
 			cancelW()
 			if wErr != nil {
@@ -346,7 +367,7 @@ func runDODILoop(epOut *gousb.OutEndpoint, epIn *gousb.InEndpoint, epIntr *gousb
 
 			{
 				resp := make([]byte, 64)
-				ctxR, cancelR := context.WithTimeout(context.Background(), 50*time.Millisecond)
+				ctxR, cancelR := context.WithTimeout(context.Background(), 500*time.Millisecond)
 				_, rErr := epIn.ReadContext(ctxR, resp)
 				cancelR()
 				if rErr != nil {
@@ -358,7 +379,7 @@ func runDODILoop(epOut *gousb.OutEndpoint, epIn *gousb.InEndpoint, epIntr *gousb
 
 			{
 				packetDIRead := []byte{UsbHeaderByte, UsbCmdReadDI, byte(ch), 0x00}
-				ctxW2, cancelW2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
+				ctxW2, cancelW2 := context.WithTimeout(context.Background(), 500*time.Millisecond)
 				_, wErr2 := epOut.WriteContext(ctxW2, packetDIRead)
 				cancelW2()
 				if wErr2 != nil {
@@ -366,7 +387,7 @@ func runDODILoop(epOut *gousb.OutEndpoint, epIn *gousb.InEndpoint, epIntr *gousb
 				}
 
 				respDI := make([]byte, 64)
-				ctxR2, cancelR2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
+				ctxR2, cancelR2 := context.WithTimeout(context.Background(), 500*time.Millisecond)
 				nDI, rErr2 := epIn.ReadContext(ctxR2, respDI)
 				cancelR2()
 				if rErr2 != nil {
