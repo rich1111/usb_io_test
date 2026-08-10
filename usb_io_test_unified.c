@@ -8,6 +8,10 @@
 #include <sys/time.h>
 #include <signal.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #define VID 0x2207
 #define PID 0x0013
 #define USB_HEADER_BYTE 0xAA
@@ -355,6 +359,9 @@ int main_loop(libusb_context *ctx) {
 }
 
 int main() {
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+#endif
     signal(SIGINT, int_handler);
     libusb_context *ctx = NULL;
     int r;
