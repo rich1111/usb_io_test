@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebUSB RK3506 Unified I/O Dashboard</title>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background: #121212; color: #e0e0e0; padding: 20px; }
+        h2 { color: #00bcd4; border-bottom: 1px solid #333; padding-bottom: 10px; }
+        .panel { background: #1e1e1e; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.5); }
+        .control-panel { display: flex; align-items: center; gap: 20px; }
+        button { background: #00bcd4; color: #000; font-weight: bold; border: none; padding: 12px 24px; border-radius: 4px; cursor: pointer; transition: background 0.2s; }
+        button:hover { background: #008ba3; }
+        button:disabled { background: #444; color: #888; cursor: not-allowed; }
+        #disconnectBtn { background: #f44336; color: white; }
+        
+        .board-badge { background: #333; color: #00e676; padding: 8px 16px; border-radius: 20px; border: 1px solid #00e676; font-weight: bold; display: none; }
+        
+        /* AI Panel Styles */
+        .ai-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-bottom: 20px; }
+        .ai-card { background: #2d2d2d; border-radius: 8px; padding: 20px; border-top: 4px solid #333; transition: border-color 0.3s; }
+        .ai-card.active { border-top-color: #00bcd4; }
+        .ai-header { display: flex; justify-content: space-between; margin-bottom: 5px; }
+        .ai-title { font-weight: bold; color: #aaa; }
+        .ai-value { font-size: 1.8rem; font-weight: bold; color: #fff; font-family: monospace; }
+        .ai-raw { font-size: 0.75rem; color: #00bcd4; background: #000; padding: 4px; border-radius: 4px; font-family: monospace; margin-top: 5px; }
+        .mode-badge { font-size: 0.8rem; padding: 2px 8px; border-radius: 12px; font-weight: bold; background: #444; color: #fff; cursor: pointer; user-select: none; }
+        .mode-badge.voltage { background: #00bcd4; color: #000; }
+        .mode-badge.current { background: #ff9800; color: #000; }
+
+        /* DODI Panel Styles */
+        .io-row { display: flex; align-items: center; margin-bottom: 15px; }
+        .io-label { width: 60px; font-weight: bold; }
+        .do-btn { background: #333; color: #aaa; width: 80px; padding: 8px; border: 2px solid #555; border-radius: 4px; cursor: pointer; }
+        .do-btn.active { background: #00bcd4; border-color: #00bcd4; color: #000; box-shadow: 0 0 10px #00bcd4; }
+        .di-led { width: 24px; height: 24px; border-radius: 50%; background: #333; border: 2px solid #555; margin-left: 20px; }
+        .di-led.active { background: #00bcd4; border-color: #00bcd4; box-shadow: 0 0 15px #00bcd4; }
+
+        #log { background: #000; color: #0f0; padding: 15px; border-radius: 4px; font-family: monospace; height: 150px; overflow-y: auto; }
+        
+        #aiPanel, #dodiPanel { display: none; }
+    </style>
+</head>
+<body>
+    <h2>🚀 WebUSB RK3506 Unified I/O Dashboard</h2>
+    
+    <div class="panel control-panel">
+        <button id="connectBtn">連接 RK3506 設備</button>
+        <button id="disconnectBtn" disabled>斷開連接</button>
+        <div id="statusText" style="color: #ffeb3b; font-weight: bold;">尚未連接...</div>
+        <div id="boardBadge" class="board-badge"></div>
+    </div>
+
+    <!-- AI Panel -->
+    <div id="aiPanel" class="panel">
+        <h3 style="color: #00bcd4;">AI/AO 監測區</h3>
+        <div class="ai-grid" id="aiGrid"></div>
+    </div>
+
+    <!-- DODI Panel -->
+    <div id="dodiPanel" class="panel">
+        <div style="display: flex; gap: 50px;">
+            <div>
+                <h3 style="color: #00bcd4;">Digital Output (DO)</h3>
+                <div id="doContainer"></div>
+            </div>
+            <div>
+                <h3 style="color: #00bcd4;">Digital Input (DI)</h3>
+                <div id="diContainer"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="panel">
+        <h3>System Log</h3>
+        <div id="log"></div>
+    </div>
+
+    <script>
+        const VID = 0x2207;
+        const USB_HEADER = 0xAA;
+        const CMD_READ_DI = 0x01;
+        const CMD_WRITE_DO = 0x02;
+        const CMD_READ_AI = 0x03;
+        const CMD_GET_AI_MODE = 0x07;
+        const CMD_SET_AI_MODE = 0x08;
+        const CMD_GET_BOARD_TYPE = 0x0B;
+
+        const BOARD_TYPES = {
+            0: "DI8DO8", 1: "DI16", 2: "DO16", 3: "DI8RELAY4", 4: "DI8DO6PWM2",
+            5: "AIAO", 6: "AI8", 7: "AO8"
+        };
+
+        let usbDevice = null;
+        let epIn = null, epOut = null, epIntr = null;
+        let targetIntfNum = -1;
+        let boardType = -1;
+        let aiPollTimer = null;
+        let isConnected = false;
+
+        const logEl = document.getElementById('log');
+        function addLog(msg) {
+            const time = new Date().toLocaleTimeString();
+            logEl.innerHTML += `[${time}] ${msg}<br>`;
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        // Initialize UI Elements
+        function initDODIUI() {
+            const doC = document.getElementById('doContainer');
+            const diC = document.getElementById('diContainer');
+            doC.innerHTML = ''; diC.innerHTML = '';
+            for(let i=0; i<8; i++) {
+                doC.innerHTML += `<div class="io-row"><div class="io-label">DO ${i}</div><button class="do-btn" id="doBtn_${i}" onclick="toggleDO(${i})">OFF</button></div>`;
+                diC.innerHTML += `<div class="io-row"><div class="io-label">DI ${i}</div><div class="di-led" id="diLed_${i}"></div></div>`;
+            }
+        }
+        function initAIUI() {
+            const grid = document.getElementById('aiGrid');
+            grid.innerHTML = '';
+            for(let i=0; i<8; i++) {
+                grid.innerHTML += `
+                    <div class="ai-card" id="aiCard_${i}">
+                        <div class="ai-header">
+                            <span class="ai-title">Channel ${i}</span>
+                            <span class="mode-badge voltage" id="modeBadge_${i}" onclick="toggleAIMode(${i})">V</span>
+                        </div>
+                        <div class="ai-value" id="aiVal_${i}">0.0000</div>
+                        <div class="ai-raw" id="aiRaw_${i}">[ Payload ]</div>
+                    </div>`;
+            }
+        }
+        initDODIUI();
+        initAIUI();
+
+        document.getElementById('connectBtn').addEventListener('click', async () => {
+            try {
+                usbDevice = await navigator.usb.requestDevice({ filters: [{ vendorId: VID }] });
+                await usbDevice.open();
+                if (usbDevice.configuration === null) await usbDevice.selectConfiguration(1);
+
+                targetIntfNum = -1;
+                epIn = epOut = epIntr = null;
+
+                for (const config of usbDevice.configurations) {
+                    for (const intf of config.interfaces) {
+                        for (const alt of intf.alternates) {
+                            if (alt.interfaceClass === 255) {
+                                targetIntfNum = intf.interfaceNumber;
+                                alt.endpoints.forEach(ep => {
+                                    if (ep.direction === "out" && ep.type === "bulk") epOut = ep.endpointNumber;
+                                    if (ep.direction === "in" && ep.type === "bulk") epIn = ep.endpointNumber;
+                                    if (ep.direction === "in" && ep.type === "interrupt") epIntr = ep.endpointNumber;
+                                });
+                            }
+                        }
+                    }
+                }
+                
+                if (targetIntfNum === -1 || epIn === null || epOut === null) {
+                    throw new Error("找不到必要的 Bulk 端點");
+                }
+
+                await usbDevice.claimInterface(targetIntfNum);
+                isConnected = true;
+                
+                const devName = usbDevice.productName || 'RK3506 Device';
+                const devSn = usbDevice.serialNumber || 'N/A';
+                document.getElementById('statusText').innerText = `● 已連接: ${devName} (SN: ${devSn})`;
+                document.getElementById('connectBtn').disabled = true;
+                document.getElementById('disconnectBtn').disabled = false;
+                
+                addLog(`✅ 設備已連接`);
+
+                // Query Board Type with retry to flush stale data
+                let foundBoard = false;
+                for (let attempt = 0; attempt < 5; attempt++) {
+                    const cmd = new Uint8Array([USB_HEADER, CMD_GET_BOARD_TYPE, 0x00, 0x00]);
+                    await usbDevice.transferOut(epOut, cmd);
+                    const res = await usbDevice.transferIn(epIn, 64);
+                    const data = new Uint8Array(res.data.buffer, res.data.byteOffset, res.data.byteLength);
+                    
+                    addLog(`[Debug] Read Bulk IN (Attempt ${attempt+1}): ${Array.from(data.slice(0, 4)).map(b=>b.toString(16)).join(' ')}`);
+                    
+                    if (data.length >= 4 && data[0] === USB_HEADER && data[1] === CMD_GET_BOARD_TYPE) {
+                        boardType = data[3];
+                        foundBoard = true;
+                        break;
+                    }
+                }
+
+                if (foundBoard) {
+                    const bName = BOARD_TYPES[boardType] || `Unknown (${boardType})`;
+                    const badge = document.getElementById('boardBadge');
+                    badge.innerText = `型號: ${bName}`;
+                    badge.style.display = 'inline-block';
+                    addLog(`📍 偵測到板卡型號: ${bName}`);
+                    
+                    if (boardType >= 5 && boardType <= 7) {
+                        document.getElementById('aiPanel').style.display = 'block';
+                        startAILoop();
+                    } else {
+                        document.getElementById('dodiPanel').style.display = 'block';
+                        if(epIntr) startDODIInterrupts();
+                    }
+                } else {
+                    addLog(`❌ 無法取得板卡型號，已達最大重試次數。`);
+                }
+            } catch (err) {
+                addLog(`❌ 連接失敗: ${err.message}`);
+            }
+        });
+
+        // DODI Logic
+        async function toggleDO(ch) {
+            if(!isConnected) return;
+            const btn = document.getElementById(`doBtn_${ch}`);
+            const targetState = btn.classList.contains('active') ? 0 : 1;
+            try {
+                const cmd = new Uint8Array([USB_HEADER, CMD_WRITE_DO, ch, targetState]);
+                await usbDevice.transferOut(epOut, cmd);
+                const res = await usbDevice.transferIn(epIn, 64);
+                const data = new Uint8Array(res.data.buffer, res.data.byteOffset, res.data.byteLength);
+                
+                if(data[0] === USB_HEADER && data[1] === CMD_WRITE_DO) {
+                    btn.classList.toggle('active');
+                    btn.innerText = targetState ? "ON" : "OFF";
+                    addLog(`⚡ DO ${ch} 寫入: ${targetState ? 'ON':'OFF'}`);
+                }
+            } catch (err) {
+                addLog(`❌ DO ${ch} 寫入失敗: ${err.message}`);
+            }
+        }
+
+        async function startDODIInterrupts() {
+            addLog("📡 啟動 DI 中斷監聽...");
+            while(isConnected && epIntr) {
+                try {
+                    const result = await usbDevice.transferIn(epIntr, 64);
+                    const data = new Uint8Array(result.data.buffer, result.data.byteOffset, result.data.byteLength);
+                    if (data[0] === 0xBB) {
+                        const ch = data[1];
+                        const state = data[2];
+                        const led = document.getElementById(`diLed_${ch}`);
+                        if (led) {
+                            if (state === 1) led.classList.add('active');
+                            else led.classList.remove('active');
+                        }
+                    }
+                } catch (err) {
+                    if (err.message.includes("NetworkError")) break;
+                }
+            }
+        }
+
+        // AI Logic
+        async function toggleAIMode(ch) {
+            if(!isConnected) return;
+            const badge = document.getElementById(`modeBadge_${ch}`);
+            const currentMode = badge.classList.contains('voltage') ? 0x00 : 0x01;
+            const newMode = currentMode === 0x00 ? 0x01 : 0x00;
+            try {
+                const cmd = new Uint8Array([USB_HEADER, CMD_SET_AI_MODE, ch, newMode]);
+                await usbDevice.transferOut(epOut, cmd);
+                const res = await usbDevice.transferIn(epIn, 64);
+                const data = new Uint8Array(res.data.buffer, res.data.byteOffset, res.data.byteLength);
+                if (data[0] === USB_HEADER && data[1] === CMD_SET_AI_MODE) {
+                    addLog(`⚙️ 通道 ${ch} 切換為 ${newMode === 0x00 ? 'Voltage' : 'Current'}`);
+                    await getAIMode(ch);
+                }
+            } catch (err) {
+                addLog(`❌ 通道 ${ch} 模式切換失敗: ${err.message}`);
+            }
+        }
+
+        async function getAIMode(ch) {
+            try {
+                const cmd = new Uint8Array([USB_HEADER, CMD_GET_AI_MODE, ch, 0x00]);
+                await usbDevice.transferOut(epOut, cmd);
+                const res = await usbDevice.transferIn(epIn, 64);
+                const data = new Uint8Array(res.data.buffer, res.data.byteOffset, res.data.byteLength);
+                if (data[0] === USB_HEADER && data[1] === CMD_GET_AI_MODE) {
+                    const mode = data[3];
+                    const badge = document.getElementById(`modeBadge_${ch}`);
+                    if (mode === 0x00) {
+                        badge.className = 'mode-badge voltage';
+                        badge.innerText = 'V';
+                    } else if (mode === 0x01) {
+                        badge.className = 'mode-badge current';
+                        badge.innerText = 'mA';
+                    }
+                }
+            } catch (e) {}
+        }
+
+        async function startAILoop() {
+            addLog("📡 啟動 AI 讀取迴圈...");
+            for(let ch=0; ch<8; ch++) await getAIMode(ch);
+            
+            aiPollTimer = setInterval(async () => {
+                if(!isConnected) { clearInterval(aiPollTimer); return; }
+                for(let ch=0; ch<8; ch++) {
+                    try {
+                        const cmd = new Uint8Array([USB_HEADER, CMD_READ_AI, ch, 0x00]);
+                        await usbDevice.transferOut(epOut, cmd);
+                        const res = await usbDevice.transferIn(epIn, 64);
+                        const data = new Uint8Array(res.data.buffer, res.data.byteOffset, res.data.byteLength);
+                        
+                        if (data[0] === USB_HEADER && data[1] === CMD_READ_AI) {
+                            const dv = new DataView(data.buffer, data.byteOffset + 3, 8);
+                            const val = dv.getFloat64(0, true);
+                            
+                            document.getElementById(`aiVal_${ch}`).innerText = val.toFixed(4);
+                            const hex = Array.from(data.slice(3,11)).map(b=>b.toString(16).padStart(2,'0').toUpperCase()).join(' ');
+                            document.getElementById(`aiRaw_${ch}`).innerText = `[ ${hex} ]`;
+                            document.getElementById(`aiCard_${ch}`).classList.add('active');
+                            setTimeout(()=>document.getElementById(`aiCard_${ch}`).classList.remove('active'), 100);
+                        }
+                    } catch(e) {}
+                }
+            }, 500);
+        }
+
+        document.getElementById('disconnectBtn').addEventListener('click', async () => {
+            isConnected = false;
+            if (aiPollTimer) clearInterval(aiPollTimer);
+            if (usbDevice) {
+                try {
+                    await usbDevice.releaseInterface(targetIntfNum);
+                    await usbDevice.close();
+                } catch(e) {}
+                usbDevice = null;
+            }
+            document.getElementById('statusText').innerText = "已斷開連接";
+            document.getElementById('connectBtn').disabled = false;
+            document.getElementById('disconnectBtn').disabled = true;
+            document.getElementById('aiPanel').style.display = 'none';
+            document.getElementById('dodiPanel').style.display = 'none';
+            document.getElementById('boardBadge').style.display = 'none';
+            addLog("🛑 已斷開 USB 連接");
+        });
+    </script>
+</body>
+</html>
