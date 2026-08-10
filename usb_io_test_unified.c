@@ -365,7 +365,11 @@ int main() {
     if (r < 0) return 1;
 
     while (keep_running) {
-        main_loop(ctx);
+        int ret = main_loop(ctx);
+        if (ret == 0) {
+            printf("\n✅ 測試圓滿結束！程式安全退出。\n");
+            break;
+        }
         if (keep_running) {
             sleep(1);
         }

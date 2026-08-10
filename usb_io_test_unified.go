@@ -51,6 +51,9 @@ func main() {
 			log.Printf("💥 [主程式] 偵測到 USB 斷線或發生錯誤: %v\n", err)
 			log.Println("⏳ 等待 5 秒後啟動自動重連機制...")
 			time.Sleep(5 * time.Second)
+		} else {
+			fmt.Println("\n✅ 測試圓滿結束！程式安全退出。")
+			break
 		}
 	}
 }
