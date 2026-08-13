@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -313,8 +314,13 @@ func runDODILoop(epOut *gousb.OutEndpoint, epIn *gousb.InEndpoint, epIntr *gousb
 	fmt.Println("=======================================================")
 
 	isConnected := true
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
 	if epIntr != nil {
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			fmt.Println("[監聽者] DI 狀態中斷監聽已啟動...")
 			for isConnected {
 				buf := make([]byte, 64)

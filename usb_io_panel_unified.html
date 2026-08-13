@@ -246,6 +246,9 @@
                             if (state === 1) led.classList.add('active');
                             else led.classList.remove('active');
                         }
+                        
+                        // 新增中斷推播日誌
+                        addLog(`⚡ [中斷推播] DI ${ch} 狀態改變 -> ${state === 1 ? 'HIGH' : 'LOW'}`);
                     }
                 } catch (err) {
                     if (err.message.includes("NetworkError")) break;

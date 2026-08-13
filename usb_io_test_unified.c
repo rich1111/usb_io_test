@@ -79,7 +79,7 @@ void *listen_for_interrupts(void *arg) {
     return NULL;
 }
 
-void run_ai_loop(libusb_device_handle *dev_handle, uint8_t ep_out, uint8_t ep_in) {
+int run_ai_loop(libusb_device_handle *dev_handle, uint8_t ep_out, uint8_t ep_in) {
     printf("\n=======================================================\n");
     printf("🚀 進入 AI/AO 測試模式\n");
     printf("=======================================================\n");
@@ -113,6 +113,9 @@ void run_ai_loop(libusb_device_handle *dev_handle, uint8_t ep_out, uint8_t ep_in
     printf("\n[🚀 AI 8 通道讀取測試] 準備執行 %d 次全通道循環...\n", ITERATIONS);
     double start_time = get_time_ms();
     
+    int consecutive_timeouts = 0;
+    int ret_code = 0;
+    
     for (int i = 0; i < ITERATIONS && keep_running; i++) {
         if (i > 0 && i % 50 == 0) printf("目前進度: %d / %d 全通道循環...\n", i, ITERATIONS);
         
@@ -122,7 +125,13 @@ void run_ai_loop(libusb_device_handle *dev_handle, uint8_t ep_out, uint8_t ep_in
             int r = libusb_bulk_transfer(dev_handle, ep_out, cmd_read, 4, &actual_len, 500);
             if (r != 0) {
                 error_count++;
+                consecutive_timeouts++;
                 printf("[USB 錯誤] AI 通道 %d 寫入失敗\n", ch);
+                if (consecutive_timeouts >= 8) {
+                    printf("💥 偵測到 Bulk 通道連續超時失去回應！\n");
+                    ret_code = 1;
+                    goto ai_end;
+                }
                 continue;
             }
             
@@ -130,17 +139,25 @@ void run_ai_loop(libusb_device_handle *dev_handle, uint8_t ep_out, uint8_t ep_in
             r = libusb_bulk_transfer(dev_handle, ep_in, resp, sizeof(resp), &actual_len, 500);
             if (r == 0 && actual_len >= 11 && resp[0] == USB_HEADER_BYTE && resp[1] == USB_CMD_READ_AI) {
                 success_count++;
+                consecutive_timeouts = 0;
                 double val;
                 memcpy(&val, &resp[3], 8);
                 latest_ai_vals[ch] = val;
                 memcpy(latest_payloads[ch], &resp[3], 8);
             } else {
                 error_count++;
+                consecutive_timeouts++;
+                if (consecutive_timeouts >= 8) {
+                    printf("💥 偵測到 Bulk 通道連續超時失去回應！\n");
+                    ret_code = 1;
+                    goto ai_end;
+                }
             }
             usleep(1000); // 1ms
         }
     }
     
+ai_end: ;
     double total_time_s = (get_time_ms() - start_time) / 1000.0;
     double tps = (total_time_s > 0) ? (success_count / total_time_s) : 0;
     
@@ -159,9 +176,10 @@ void run_ai_loop(libusb_device_handle *dev_handle, uint8_t ep_out, uint8_t ep_in
     }
     printf("-------------------------------------------------------\n");
     printf("🚀 每秒實際 I/O 吞吐量 (TPS) : %.2f 次/秒\n", tps);
+    return ret_code;
 }
 
-void run_dodi_loop(libusb_device_handle *dev_handle, uint8_t ep_out, uint8_t ep_in, uint8_t ep_intr) {
+int run_dodi_loop(libusb_device_handle *dev_handle, uint8_t ep_out, uint8_t ep_in, uint8_t ep_intr) {
     printf("\n=======================================================\n");
     printf("🚀 進入 DO/DI 測試模式\n");
     printf("=======================================================\n");
@@ -182,6 +200,7 @@ void run_dodi_loop(libusb_device_handle *dev_handle, uint8_t ep_out, uint8_t ep_
     
     printf("\n[🚀 8 通道迴圈驗證測試] 準備執行 %d 次全通道循環...\n", ITERATIONS);
     double start_time = get_time_ms();
+    int ret_code = 0;
     
     for (int i = 0; i < ITERATIONS && is_connected && keep_running; i++) {
         if (i > 0 && i % 50 == 0) printf("目前進度: %d / %d 全通道循環...\n", i, ITERATIONS);
@@ -231,6 +250,7 @@ void run_dodi_loop(libusb_device_handle *dev_handle, uint8_t ep_out, uint8_t ep_
             if (consecutive_timeouts >= 8) {
                 printf("💥 偵測到 Bulk 通道連續超時失去回應！\n");
                 is_connected = false;
+                ret_code = 1;
                 break;
             }
         }
@@ -259,6 +279,7 @@ void run_dodi_loop(libusb_device_handle *dev_handle, uint8_t ep_out, uint8_t ep_
     }
     printf("-------------------------------------------------------\n");
     printf("🚀 每秒實際 TPS : %.2f 次傳輸/秒\n", tps);
+    return ret_code;
 }
 
 int main_loop(libusb_context *ctx) {
@@ -363,15 +384,16 @@ int main_loop(libusb_context *ctx) {
         return 1;
     }
 
+    int loop_ret = 0;
     if (board_id >= 5 && board_id <= 7) {
-        run_ai_loop(dev_handle, ep_out, ep_in);
+        loop_ret = run_ai_loop(dev_handle, ep_out, ep_in);
     } else {
-        run_dodi_loop(dev_handle, ep_out, ep_in, ep_intr);
+        loop_ret = run_dodi_loop(dev_handle, ep_out, ep_in, ep_intr);
     }
 
     libusb_release_interface(dev_handle, target_intf);
     libusb_close(dev_handle);
-    return 0;
+    return loop_ret;
 }
 
 int main() {
