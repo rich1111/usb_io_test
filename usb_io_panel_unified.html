@@ -29,7 +29,7 @@
         .mode-badge.current { background: #ff9800; color: #000; }
 
         /* DODI Panel Styles */
-        .io-row { display: flex; align-items: center; margin-bottom: 15px; }
+        .io-row { display: flex; align-items: center; margin-bottom: 15px; height: 40px; }
         .io-label { width: 60px; font-weight: bold; }
         .do-btn { background: #333; color: #aaa; width: 80px; padding: 8px; border: 2px solid #555; border-radius: 4px; cursor: pointer; }
         .do-btn.active { background: #00bcd4; border-color: #00bcd4; color: #000; box-shadow: 0 0 10px #00bcd4; }
@@ -82,6 +82,7 @@
         const CMD_READ_DI = 0x01;
         const CMD_WRITE_DO = 0x02;
         const CMD_READ_AI = 0x03;
+        const CMD_READ_DO = 0x05;
         const CMD_GET_AI_MODE = 0x07;
         const CMD_SET_AI_MODE = 0x08;
         const CMD_GET_BOARD_TYPE = 0x0B;
@@ -201,6 +202,7 @@
                         startAILoop();
                     } else {
                         document.getElementById('dodiPanel').style.display = 'block';
+                        await readInitialDODIState();
                         if(epIntr) startDODIInterrupts();
                     }
                 } else {
@@ -229,6 +231,48 @@
                 }
             } catch (err) {
                 addLog(`❌ DO ${ch} 寫入失敗: ${err.message}`);
+            }
+        }
+
+        async function readInitialDODIState() {
+            addLog("📡 讀取初始 DO/DI 狀態...");
+            for (let ch = 0; ch < 8; ch++) {
+                try {
+                    // Read DO
+                    const cmdDO = new Uint8Array([USB_HEADER, CMD_READ_DO, ch, 0x00]);
+                    await usbDevice.transferOut(epOut, cmdDO);
+                    const resDO = await usbDevice.transferIn(epIn, 64);
+                    const dataDO = new Uint8Array(resDO.data.buffer, resDO.data.byteOffset, resDO.data.byteLength);
+                    if (dataDO[0] === USB_HEADER && dataDO[1] === CMD_READ_DO && dataDO[2] === ch) {
+                        const state = dataDO[3];
+                        const btn = document.getElementById(`doBtn_${ch}`);
+                        if (btn) {
+                            if (state === 1) {
+                                btn.classList.add('active');
+                                btn.innerText = "ON";
+                            } else {
+                                btn.classList.remove('active');
+                                btn.innerText = "OFF";
+                            }
+                        }
+                    }
+
+                    // Read DI
+                    const cmdDI = new Uint8Array([USB_HEADER, CMD_READ_DI, ch, 0x00]);
+                    await usbDevice.transferOut(epOut, cmdDI);
+                    const resDI = await usbDevice.transferIn(epIn, 64);
+                    const dataDI = new Uint8Array(resDI.data.buffer, resDI.data.byteOffset, resDI.data.byteLength);
+                    if (dataDI[0] === USB_HEADER && dataDI[1] === CMD_READ_DI) {
+                        const state = dataDI[3];
+                        const led = document.getElementById(`diLed_${ch}`);
+                        if (led) {
+                            if (state === 1) led.classList.add('active');
+                            else led.classList.remove('active');
+                        }
+                    }
+                } catch (e) {
+                    addLog(`⚠️ 讀取 DO/DI ${ch} 初始狀態失敗`);
+                }
             }
         }
 
