@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQTT RK3506 Unified I/O Dashboard</title>
+    <!-- Include Paho MQTT Client -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background: #121212; color: #e0e0e0; padding: 20px; }
+        h2 { color: #00bcd4; border-bottom: 1px solid #333; padding-bottom: 10px; }
+        .panel { background: #1e1e1e; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.5); }
+        .control-panel { display: flex; align-items: center; gap: 20px; }
+        button { background: #00bcd4; color: #000; font-weight: bold; border: none; padding: 12px 24px; border-radius: 4px; cursor: pointer; transition: background 0.2s; }
+        button:hover { background: #008ba3; }
+        button:disabled { background: #444; color: #888; cursor: not-allowed; }
+        #disconnectBtn { background: #f44336; color: white; }
+        
+        .board-badge { background: #333; color: #00e676; padding: 8px 16px; border-radius: 20px; border: 1px solid #00e676; font-weight: bold; display: none; }
+        
+        /* AI Panel Styles */
+        .ai-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-bottom: 20px; }
+        .ai-card { background: #2d2d2d; border-radius: 8px; padding: 20px; border-top: 4px solid #333; transition: border-color 0.3s; }
+        .ai-card.active { border-top-color: #00bcd4; }
+        .ai-header { display: flex; justify-content: space-between; margin-bottom: 5px; }
+        .ai-title { font-weight: bold; color: #aaa; }
+        .ai-value { font-size: 1.8rem; font-weight: bold; color: #fff; font-family: monospace; }
+        
+        /* DODI Panel Styles */
+        .io-row { display: flex; align-items: center; margin-bottom: 15px; height: 40px; }
+        .io-label { width: 60px; font-weight: bold; }
+        .do-btn { background: #333; color: #aaa; width: 80px; padding: 8px; border: 2px solid #555; border-radius: 4px; cursor: pointer; }
+        .do-btn.active { background: #00bcd4; border-color: #00bcd4; color: #000; box-shadow: 0 0 10px #00bcd4; }
+        .di-led { width: 24px; height: 24px; border-radius: 50%; background: #333; border: 2px solid #555; margin-left: 20px; }
+        .di-led.active { background: #00bcd4; border-color: #00bcd4; box-shadow: 0 0 15px #00bcd4; }
+
+        #log { background: #000; color: #0f0; padding: 15px; border-radius: 4px; font-family: monospace; height: 150px; overflow-y: auto; }
+        
+        #aiPanel, #dodiPanel { display: block; }
+    </style>
+</head>
+<body>
+    <h2>🚀 Web MQTT RK3506 Unified I/O Dashboard</h2>
+    
+    <div class="panel control-panel">
+        <button id="connectBtn">連接 MQTT Broker</button>
+        <button id="disconnectBtn" disabled>斷開連接</button>
+        <div id="statusText" style="color: #ffeb3b; font-weight: bold;">尚未連接...</div>
+    </div>
+
+    <!-- AI Panel -->
+    <div id="aiPanel" class="panel">
+        <h3 style="color: #00bcd4;">AI/AO 監測區</h3>
+        <div class="ai-grid" id="aiGrid"></div>
+    </div>
+
+    <!-- DODI Panel -->
+    <div id="dodiPanel" class="panel">
+        <div style="display: flex; gap: 50px;">
+            <div>
+                <h3 style="color: #00bcd4;">Digital Output (DO)</h3>
+                <div id="doContainer"></div>
+            </div>
+            <div>
+                <h3 style="color: #00bcd4;">Digital Input (DI)</h3>
+                <div id="diContainer"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="panel">
+        <h3>System Log</h3>
+        <div id="log"></div>
+    </div>
+
+    <script>
+        let mqttClient = null;
+        let isConnected = false;
+        let pollTimer = null;
+        
+        let config = {};
+
+        // Fetch config from mqtt_config.json
+        fetch('mqtt_config.json')
+            .then(res => res.json())
+            .then(data => {
+                config = data;
+                addLog("✅ 成功載入 mqtt_config.json 設定");
+            })
+            .catch(err => {
+                addLog("❌ 無法載入 mqtt_config.json (如果是直接點開本地 HTML，可能會有安全限制，建議使用 python -m http.server 啟動伺服器)。將使用預設設定...");
+                config = {
+                    broker: "127.0.0.1",
+                    ws_port: 9001,
+                    topic_query: "rk3506/io/query",
+                    topic_status: "rk3506/io/status",
+                    topic_interrupt: "rk3506/io/interrupt",
+                    topic_write: "rk3506/io/write"
+                };
+            });
+
+        const logEl = document.getElementById('log');
+        function addLog(msg) {
+            const time = new Date().toLocaleTimeString();
+            logEl.innerHTML += `[${time}] ${msg}<br>`;
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        // Initialize UI Elements
+        function initDODIUI() {
+            const doC = document.getElementById('doContainer');
+            const diC = document.getElementById('diContainer');
+            doC.innerHTML = ''; diC.innerHTML = '';
+            for(let i=0; i<8; i++) {
+                doC.innerHTML += `<div class="io-row"><div class="io-label">DO ${i}</div><button class="do-btn" id="doBtn_${i}" onclick="toggleDO(${i})">OFF</button></div>`;
+                diC.innerHTML += `<div class="io-row"><div class="io-label">DI ${i}</div><div class="di-led" id="diLed_${i}"></div></div>`;
+            }
+        }
+        function initAIUI() {
+            const grid = document.getElementById('aiGrid');
+            grid.innerHTML = '';
+            for(let i=0; i<8; i++) {
+                grid.innerHTML += `
+                    <div class="ai-card" id="aiCard_${i}">
+                        <div class="ai-header">
+                            <span class="ai-title">Channel ${i}</span>
+                        </div>
+                        <div class="ai-value" id="aiVal_${i}">0.0000</div>
+                    </div>`;
+            }
+        }
+        initDODIUI();
+        initAIUI();
+
+        document.getElementById('connectBtn').addEventListener('click', () => {
+            addLog(`正在連接至 MQTT Broker (ws://${config.broker}:${config.ws_port})...`);
+            mqttClient = new Paho.MQTT.Client(config.broker, config.ws_port, "web_client_" + parseInt(Math.random() * 100, 10));
+            
+            mqttClient.onConnectionLost = onConnectionLost;
+            mqttClient.onMessageArrived = onMessageArrived;
+
+            mqttClient.connect({
+                onSuccess: onConnect,
+                onFailure: onFailure
+            });
+        });
+
+        function onConnect() {
+            isConnected = true;
+            document.getElementById('statusText').innerText = `● 已連接 MQTT Broker`;
+            document.getElementById('statusText').style.color = '#00e676';
+            document.getElementById('connectBtn').disabled = true;
+            document.getElementById('disconnectBtn').disabled = false;
+            
+            addLog("✅ MQTT Broker 連接成功！");
+            
+            mqttClient.subscribe(config.topic_status);
+            mqttClient.subscribe(config.topic_interrupt);
+            addLog(`📡 已訂閱主題: ${config.topic_status}, ${config.topic_interrupt}`);
+            
+            // Start Polling loop to query IO state periodically
+            pollTimer = setInterval(() => {
+                if(!isConnected) return;
+                for (let i = 0; i < 8; i++) {
+                    queryIO(i, "DI");
+                    queryIO(i, "DO");
+                }
+            }, 1000); // Query once a second
+        }
+
+        function onFailure(err) {
+            addLog(`❌ 連接失敗: ${err.errorMessage}`);
+        }
+
+        function onConnectionLost(responseObject) {
+            isConnected = false;
+            if (responseObject.errorCode !== 0) {
+                addLog(`⚠️ MQTT 連接斷開: ${responseObject.errorMessage}`);
+            }
+            document.getElementById('statusText').innerText = `已斷開連接`;
+            document.getElementById('statusText').style.color = '#ffeb3b';
+            document.getElementById('connectBtn').disabled = false;
+            document.getElementById('disconnectBtn').disabled = true;
+            if(pollTimer) clearInterval(pollTimer);
+        }
+
+        function updateDiUI(channel, state) {
+            const led = document.getElementById(`diLed_${channel}`);
+            if (led) {
+                if (state === 1) led.classList.add('active');
+                else led.classList.remove('active');
+            }
+        }
+
+        function onMessageArrived(message) {
+            try {
+                const data = JSON.parse(message.payloadString);
+                
+                if (message.destinationName === config.topic_status) {
+                    if (data.type === 'AI') {
+                        const val = data.value;
+                        document.getElementById(`aiVal_${data.channel}`).innerText = val.toFixed(4);
+                        document.getElementById(`aiCard_${data.channel}`).classList.add('active');
+                        setTimeout(() => document.getElementById(`aiCard_${data.channel}`).classList.remove('active'), 100);
+                    } else if (data.type === 'DI') {
+                        updateDiUI(data.channel, data.state);
+                    } else if (data.type === 'DO') {
+                        updateDoUI(data.channel, data.state);
+                    }
+                } else if (message.destinationName === config.topic_interrupt) {
+                    addLog(`⚡ [中斷] DI ${data.channel} 變更為 ${data.state}`);
+                    updateDiUI(data.channel, data.state);
+                    
+
+                }
+            } catch (e) {}
+        }
+        
+        function updateDoUI(channel, state) {
+            const btn = document.getElementById(`doBtn_${channel}`);
+            if (btn) {
+                btn.innerText = state === 1 ? "ON" : "OFF";
+                if (state === 1) btn.classList.add('active');
+                else btn.classList.remove('active');
+            }
+        }
+
+        function updateDiUI(channel, state) {
+            const led = document.getElementById(`diLed_${channel}`);
+            if (led) {
+                if (state === 1) led.classList.add('active');
+                else led.classList.remove('active');
+            }
+        }
+        function queryIO(ch, target = "DI") {
+            if (!isConnected) return;
+            const payload = JSON.stringify({ channel: ch, target: target });
+            const message = new Paho.MQTT.Message(payload);
+            message.destinationName = config.topic_query;
+            mqttClient.send(message);
+        }
+
+        function toggleDO(ch) {
+            if(!isConnected) return;
+            const btn = document.getElementById(`doBtn_${ch}`);
+            const targetState = btn.classList.contains('active') ? 0 : 1;
+            
+            const payload = JSON.stringify({ channel: ch, state: targetState });
+            const message = new Paho.MQTT.Message(payload);
+            message.destinationName = config.topic_write;
+            mqttClient.send(message);
+            
+            // Optimistic UI update
+            btn.classList.toggle('active');
+            btn.innerText = targetState ? "ON" : "OFF";
+            addLog(`🚀 [MQTT 寫入] 發送 DO ${ch} -> ${targetState}`);
+        }
+
+        document.getElementById('disconnectBtn').addEventListener('click', () => {
+            if (mqttClient) {
+                mqttClient.disconnect();
+            }
+            addLog("🛑 已主動斷開 MQTT 連接");
+        });
+    </script>
+</body>
+</html>

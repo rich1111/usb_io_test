@@ -1,0 +1,9 @@
+{
+  "broker": "127.0.0.1",
+  "port": 1883,
+  "ws_port": 9001,
+  "topic_query": "rk3506/io/query",
+  "topic_status": "rk3506/io/status",
+  "topic_interrupt": "rk3506/io/interrupt",
+  "topic_write": "rk3506/io/write"
+}

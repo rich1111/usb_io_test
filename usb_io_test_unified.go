@@ -381,7 +381,7 @@ func runDODILoop(epOut *gousb.OutEndpoint, epIn *gousb.InEndpoint, epIntr *gousb
 				}
 			}
 
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 
 			{
 				packetDIRead := []byte{UsbHeaderByte, UsbCmdReadDI, byte(ch), 0x00}

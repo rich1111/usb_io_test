@@ -9,10 +9,11 @@ ifeq ($(UNAME_S),Darwin)
     CFLAGS += -mmacosx-version-min=$(MAC_VER)
 endif
 
-TARGETS = usb_io_test_dodi usb_io_test_ai usb_io_test_unified
+TARGETS = usb_io_test_dodi usb_io_test_ai usb_io_test_unified mqtt_client_unified
 SRC_DODI = usb_io_test_dodi.c
 SRC_AI = usb_io_test_ai.c
 SRC_UNIFIED = usb_io_test_unified.c
+SRC_MQTT = mqtt_client_unified.c
 
 all: $(TARGETS)
 
@@ -24,6 +25,9 @@ usb_io_test_ai: $(SRC_AI)
 
 usb_io_test_unified: $(SRC_UNIFIED)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+mqtt_client_unified: $(SRC_MQTT)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lmosquitto
 
 clean:
 	rm -f $(TARGETS)
