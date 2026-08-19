@@ -47,6 +47,24 @@ void sig_handler(int signo) {
     }
 }
 
+// Returns true if a libusb error code means the device is gone (disconnected)
+bool usb_device_gone(int r) {
+    return r == LIBUSB_ERROR_NO_DEVICE || r == LIBUSB_ERROR_IO ||
+           r == LIBUSB_ERROR_PIPE || r == LIBUSB_ERROR_ACCESS;
+}
+
+// Handle a libusb transfer error: trigger reconnection on device loss,
+// silently ignore timeouts, print other errors.
+void handle_usb_error(int r, const char *action) {
+    if (r == 0) return;
+    if (usb_device_gone(r)) {
+        printf("💔 設備已斷線 (%s)，觸發自動重連...\n", action);
+        is_connected = false;
+    } else if (r != LIBUSB_ERROR_TIMEOUT) {
+        printf("⚠️ %s USB 通訊錯誤: %s\n", action, libusb_error_name(r));
+    }
+}
+
 // Minimal string-based JSON parsing for config
 void load_config() {
     FILE *f = fopen("mqtt_config.json", "r");
@@ -96,9 +114,11 @@ void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto_messag
         if (board_type_id >= 5 && board_type_id <= 7) {
             unsigned char cmd[] = {USB_HEADER_BYTE, USB_CMD_READ_AI, (unsigned char)ch, 0x00};
             int actual_len;
-            if (libusb_bulk_transfer(dev_handle, ep_out, cmd, sizeof(cmd), &actual_len, 500) == 0) {
+            int r = libusb_bulk_transfer(dev_handle, ep_out, cmd, sizeof(cmd), &actual_len, 500);
+            if (r == 0) {
                 unsigned char resp[64];
-                if (libusb_bulk_transfer(dev_handle, ep_in, resp, sizeof(resp), &actual_len, 500) == 0) {
+                r = libusb_bulk_transfer(dev_handle, ep_in, resp, sizeof(resp), &actual_len, 500);
+                if (r == 0) {
                     if (actual_len >= 11 && resp[0] == USB_HEADER_BYTE && resp[1] == USB_CMD_READ_AI) {
                         double val;
                         memcpy(&val, &resp[3], sizeof(double));
@@ -106,7 +126,11 @@ void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto_messag
                         snprintf(res_payload, sizeof(res_payload), "{\"channel\": %d, \"type\": \"AI\", \"value\": %.4f}", ch, val);
                         mosquitto_publish(mosq, NULL, config.topic_status, strlen(res_payload), res_payload, 0, false);
                     }
+                } else {
+                    handle_usb_error(r, "Query AI");
                 }
+            } else {
+                handle_usb_error(r, "Query AI");
             }
         } else {
             char target[16] = "DI";
@@ -116,30 +140,42 @@ void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto_messag
             if (strcmp(target, "DO") == 0) {
                 unsigned char cmd[] = {USB_HEADER_BYTE, USB_CMD_READ_DO, (unsigned char)ch, 0x00};
                 int actual_len;
-                if (libusb_bulk_transfer(dev_handle, ep_out, cmd, sizeof(cmd), &actual_len, 500) == 0) {
+                int r = libusb_bulk_transfer(dev_handle, ep_out, cmd, sizeof(cmd), &actual_len, 500);
+                if (r == 0) {
                     unsigned char resp[64];
-                    if (libusb_bulk_transfer(dev_handle, ep_in, resp, sizeof(resp), &actual_len, 500) == 0) {
+                    r = libusb_bulk_transfer(dev_handle, ep_in, resp, sizeof(resp), &actual_len, 500);
+                    if (r == 0) {
                         if (actual_len >= 4 && resp[0] == USB_HEADER_BYTE && resp[1] == USB_CMD_READ_DO) {
                             int state = resp[3];
                             char res_payload[128];
                             snprintf(res_payload, sizeof(res_payload), "{\"channel\": %d, \"type\": \"DO\", \"state\": %d}", ch, state);
                             mosquitto_publish(mosq, NULL, config.topic_status, strlen(res_payload), res_payload, 0, false);
                         }
+                    } else {
+                        handle_usb_error(r, "Query DO");
                     }
+                } else {
+                    handle_usb_error(r, "Query DO");
                 }
             } else {
                 unsigned char cmd[] = {USB_HEADER_BYTE, USB_CMD_READ_DI, (unsigned char)ch, 0x00};
                 int actual_len;
-                if (libusb_bulk_transfer(dev_handle, ep_out, cmd, sizeof(cmd), &actual_len, 500) == 0) {
+                int r = libusb_bulk_transfer(dev_handle, ep_out, cmd, sizeof(cmd), &actual_len, 500);
+                if (r == 0) {
                     unsigned char resp[64];
-                    if (libusb_bulk_transfer(dev_handle, ep_in, resp, sizeof(resp), &actual_len, 500) == 0) {
+                    r = libusb_bulk_transfer(dev_handle, ep_in, resp, sizeof(resp), &actual_len, 500);
+                    if (r == 0) {
                         if (actual_len >= 4 && resp[0] == USB_HEADER_BYTE && resp[1] == USB_CMD_READ_DI) {
                             int state = resp[3];
                             char res_payload[128];
                             snprintf(res_payload, sizeof(res_payload), "{\"channel\": %d, \"type\": \"DI\", \"state\": %d}", ch, state);
                             mosquitto_publish(mosq, NULL, config.topic_status, strlen(res_payload), res_payload, 0, false);
                         }
+                    } else {
+                        handle_usb_error(r, "Query DI");
                     }
+                } else {
+                    handle_usb_error(r, "Query DI");
                 }
             }
         }
@@ -156,11 +192,17 @@ void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto_messag
         pthread_mutex_lock(&usb_mutex);
         unsigned char cmd[] = {USB_HEADER_BYTE, USB_CMD_WRITE_DO, (unsigned char)ch, (unsigned char)state};
         int actual_len;
-        if (libusb_bulk_transfer(dev_handle, ep_out, cmd, sizeof(cmd), &actual_len, 500) == 0) {
+        int r = libusb_bulk_transfer(dev_handle, ep_out, cmd, sizeof(cmd), &actual_len, 500);
+        if (r == 0) {
             unsigned char resp[64];
-            if (libusb_bulk_transfer(dev_handle, ep_in, resp, sizeof(resp), &actual_len, 500) == 0) {
+            r = libusb_bulk_transfer(dev_handle, ep_in, resp, sizeof(resp), &actual_len, 500);
+            if (r == 0) {
                 printf("✅ 成功寫入 DO %d -> %d\n", ch, state);
+            } else {
+                handle_usb_error(r, "Write DO");
             }
+        } else {
+            handle_usb_error(r, "Write DO");
         }
         pthread_mutex_unlock(&usb_mutex);
     }
@@ -200,6 +242,8 @@ void* interrupt_listener(void* arg) {
 }
 
 int main() {
+    // Line-buffer stdout so logs appear in real time even when redirected
+    setvbuf(stdout, NULL, _IOLBF, 0);
     load_config();
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);

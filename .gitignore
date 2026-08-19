@@ -2,3 +2,5 @@
 __pycache__/
 .idea/
 *.bak
+mqtt_client_unified
+mqtt_client_unified_go

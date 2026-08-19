@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -78,6 +79,33 @@ func loadConfig() {
 	fmt.Println("✅ 成功載入 MQTT 設定檔")
 }
 
+// usbDeviceGone returns true if the USB error means the device has been
+// disconnected (as opposed to a recoverable timeout / pipe error).
+func usbDeviceGone(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, gousb.ErrorNoDevice) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no such device") || strings.Contains(msg, "device was disconnected")
+}
+
+// handleUSBError logs a USB error and triggers reconnection when the device
+// is gone. Timeouts are logged as warnings (recoverable), not fatal.
+func handleUSBError(err error, action string) {
+	if err == nil {
+		return
+	}
+	if usbDeviceGone(err) {
+		fmt.Printf("💔 設備已斷線 (%s)，觸發自動重連...\n", action)
+		isConnected = false
+	} else if err != context.DeadlineExceeded && !strings.Contains(strings.ToLower(err.Error()), "timeout") {
+		fmt.Printf("⚠️ %s USB 通訊錯誤: %v\n", action, err)
+	}
+}
+
 func setupMQTT() {
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(fmt.Sprintf("tcp://%s:%d", config.Broker, config.Port))
@@ -122,14 +150,19 @@ func handleQuery(client mqtt.Client, msg mqtt.Message) {
 		_, err := epOut.WriteContext(ctxW, packet)
 		cancelW()
 		if err != nil {
+			handleUSBError(err, "Query AI")
 			return
 		}
-		
+
 		resp := make([]byte, 64)
 		ctxR, cancelR := context.WithTimeout(context.Background(), 500*time.Millisecond)
-		n, _ := epIn.ReadContext(ctxR, resp)
+		n, rErr := epIn.ReadContext(ctxR, resp)
 		cancelR()
-		
+		if rErr != nil {
+			handleUSBError(rErr, "Query AI")
+			return
+		}
+
 		if n >= 11 && resp[0] == UsbHeaderByte && resp[1] == UsbCmdReadAI {
 			bits := binary.LittleEndian.Uint64(resp[3:11])
 			val := math.Float64frombits(bits)
@@ -143,14 +176,19 @@ func handleQuery(client mqtt.Client, msg mqtt.Message) {
 			_, err := epOut.WriteContext(ctxW, packet)
 			cancelW()
 			if err != nil {
+				handleUSBError(err, "Query DO")
 				return
 			}
-			
+
 			resp := make([]byte, 64)
 			ctxR, cancelR := context.WithTimeout(context.Background(), 500*time.Millisecond)
-			n, _ := epIn.ReadContext(ctxR, resp)
+			n, rErr := epIn.ReadContext(ctxR, resp)
 			cancelR()
-			
+			if rErr != nil {
+				handleUSBError(rErr, "Query DO")
+				return
+			}
+
 			if n >= 4 && resp[0] == UsbHeaderByte && resp[1] == UsbCmdReadDO {
 				state := int(resp[3])
 				resPayload, _ := json.Marshal(MsgPayload{Channel: int(ch), Type: "DO", State: state})
@@ -162,14 +200,19 @@ func handleQuery(client mqtt.Client, msg mqtt.Message) {
 			_, err := epOut.WriteContext(ctxW, packet)
 			cancelW()
 			if err != nil {
+				handleUSBError(err, "Query DI")
 				return
 			}
-			
+
 			resp := make([]byte, 64)
 			ctxR, cancelR := context.WithTimeout(context.Background(), 500*time.Millisecond)
-			n, _ := epIn.ReadContext(ctxR, resp)
+			n, rErr := epIn.ReadContext(ctxR, resp)
 			cancelR()
-			
+			if rErr != nil {
+				handleUSBError(rErr, "Query DI")
+				return
+			}
+
 			if n >= 4 && resp[0] == UsbHeaderByte && resp[1] == UsbCmdReadDI {
 				state := int(resp[3])
 				resPayload, _ := json.Marshal(MsgPayload{Channel: int(ch), Type: "DI", State: state})
@@ -204,14 +247,19 @@ func handleWrite(client mqtt.Client, msg mqtt.Message) {
 	_, err = epOut.WriteContext(ctxW, packet)
 	cancelW()
 	if err != nil {
+		handleUSBError(err, "Write DO")
 		return
 	}
-	
+
 	resp := make([]byte, 64)
 	ctxR, cancelR := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	n, _ := epIn.ReadContext(ctxR, resp)
+	n, rErr := epIn.ReadContext(ctxR, resp)
 	cancelR()
-	
+	if rErr != nil {
+		handleUSBError(rErr, "Write DO")
+		return
+	}
+
 	if n >= 4 && resp[0] == UsbHeaderByte && resp[1] == UsbCmdWriteDO {
 		fmt.Printf("✅ 成功寫入 DO %d -> %d\n", ch, state)
 	}

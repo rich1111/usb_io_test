@@ -42,14 +42,14 @@ def load_config():
         print(f"❌ 讀取 mqtt_config.json 失敗: {e}")
         sys.exit(1)
 
-def on_mqtt_connect(client, userdata, flags, rc):
-    if rc == 0:
+def on_mqtt_connect(client, userdata, flags, reason_code, properties):
+    if reason_code == 0:
         print(f"✅ 成功連接到 MQTT Broker ({config['broker']}:{config['port']})")
         client.subscribe(config['topic_query'])
         client.subscribe(config['topic_write'])
         print(f"📡 已訂閱主題: {config['topic_query']} 與 {config['topic_write']}")
     else:
-        print(f"❌ 連接 MQTT Broker 失敗，返回碼: {rc}")
+        print(f"❌ 連接 MQTT Broker 失敗，返回碼: {reason_code}")
 
 def on_mqtt_message(client, userdata, msg):
     global is_connected
@@ -70,6 +70,7 @@ def on_mqtt_message(client, userdata, msg):
         handle_write(data)
 
 def handle_query(data):
+    global is_connected
     ch = data.get("channel", 0)
     
     with usb_lock:
@@ -105,8 +106,12 @@ def handle_query(data):
                         mqtt_client.publish(config['topic_status'], res_payload)
         except usb.core.USBError as e:
             print(f"⚠️ Query USB 通訊錯誤: {e}")
+            if e.errno == 19 or 'No such device' in str(e):
+                print("💔 設備已斷線，觸發自動重連...")
+                is_connected = False
 
 def handle_write(data):
+    global is_connected
     ch = data.get("channel", 0)
     state = data.get("state", 0)
     
@@ -121,6 +126,9 @@ def handle_write(data):
                     print(f"✅ 成功寫入 DO {ch} -> {state}")
             except usb.core.USBError as e:
                 print(f"⚠️ Write USB 通訊錯誤: {e}")
+                if e.errno == 19 or 'No such device' in str(e):
+                    print("💔 設備已斷線，觸發自動重連...")
+                    is_connected = False
 
 def usb_interrupt_listener():
     global is_connected
@@ -152,7 +160,7 @@ def main():
     load_config()
     
     # 建立 MQTT Client
-    mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
+    mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     mqtt_client.on_connect = on_mqtt_connect
     mqtt_client.on_message = on_mqtt_message
     
