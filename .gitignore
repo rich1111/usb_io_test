@@ -4,3 +4,10 @@ __pycache__/
 *.bak
 mqtt_client_unified
 mqtt_client_unified_go
+mqtt_client_unified.exe
+usb_io_test_ai
+usb_io_test_ai.exe
+usb_io_test_dodi
+usb_io_test_dodi.exe
+usb_io_test_unified
+usb_io_test_unified.exe
